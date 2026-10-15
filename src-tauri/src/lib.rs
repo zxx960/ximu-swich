@@ -16,15 +16,46 @@ const KEY_NAME: &str = "Codex Quick Connect";
 #[derive(Clone, Deserialize, Serialize)] struct Account { email: String, balance: f64 }
 #[derive(Clone, Deserialize, Serialize)] struct SavedCredentials { email: String, password: String }
 #[derive(Deserialize)] struct LoginResponse { access_token: String }
-#[derive(Deserialize)] struct ApiKey { id: i64, key: String }
+#[derive(Deserialize)] struct ApiKey {
+    id: i64,
+    key: String,
+    name: String,
+    group_id: Option<i64>,
+    status: String,
+    expires_at: Option<String>,
+    #[serde(default)] quota: f64,
+    #[serde(default)] quota_used: f64,
+}
+#[derive(Deserialize)] struct KeyPage { items: Vec<ApiKey>, pages: u64 }
+#[derive(Serialize)] struct AvailableKey { id: i64, name: String, preview: String }
 #[derive(Clone, Deserialize, Serialize)] struct AvailableGroup { id: i64, name: String, platform: String }
 #[derive(Serialize)] struct CreateKeyRequest<'a> { name: &'a str, group_id: i64 }
-#[derive(Serialize)] struct UpdateKeyGroupRequest { group_id: i64 }
 #[derive(Deserialize, Serialize)] struct ProvisionedKey { id: i64, secret: String, #[serde(default)] group_id: Option<i64> }
-#[derive(Serialize)] struct EnableResult { balance: f64, key_created: bool, backup_path: String }
+#[derive(Serialize)] struct EnableResult { balance: f64, key_created: bool, backup_path: String, key: AvailableKey }
 #[derive(Serialize)] struct RestoreResult { backup_path: String, rollback_path: String }
 
 fn err(message: impl Into<String>) -> String { message.into() }
+
+impl ApiKey {
+    fn usable_for_group(&self, group_id: i64) -> bool {
+        self.id > 0 && self.group_id == Some(group_id) && self.status == "active"
+            && !self.key.trim().is_empty()
+            && (self.quota <= 0.0 || self.quota_used < self.quota)
+            && self.expires_at.as_deref().map_or(true, |expires_at| {
+                chrono::DateTime::parse_from_rfc3339(expires_at)
+                    .map(|expires_at| expires_at > chrono::Utc::now()).unwrap_or(false)
+            })
+    }
+
+    fn available(&self) -> AvailableKey {
+        let suffix: String = self.key.chars().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect();
+        AvailableKey {
+            id: self.id,
+            name: self.name.clone(),
+            preview: if self.key.chars().count() > 8 { format!("••••{suffix}") } else { "••••".to_owned() },
+        }
+    }
+}
 
 async fn request_json<T: DeserializeOwned>(request: reqwest::RequestBuilder) -> Result<T, String> {
     let response = request.send().await.map_err(|_| err("无法连接到中转站，请检查网络后重试。"))?;
@@ -47,6 +78,21 @@ async fn request_json<T: DeserializeOwned>(request: reqwest::RequestBuilder) -> 
 }
 
 async fn get_account(client: &Client, token: &str) -> Result<Account, String> { request_json(client.get(format!("{API_BASE}/auth/me")).bearer_auth(token)).await }
+
+async fn get_group_keys(client: &Client, token: &str, group_id: i64) -> Result<Vec<ApiKey>, String> {
+    let mut keys = Vec::new();
+    let mut page = 1_u64;
+    loop {
+        let result: KeyPage = request_json(client.get(format!("{API_BASE}/keys"))
+            .bearer_auth(token)
+            .query(&[("page", page.to_string()), ("page_size", "100".to_owned()), ("group_id", group_id.to_string())])).await?;
+        keys.extend(result.items.into_iter().filter(|key| key.usable_for_group(group_id)));
+        if page >= result.pages { break; }
+        page += 1;
+    }
+    Ok(keys)
+}
+
 fn data_dir() -> Result<PathBuf, String> { Ok(dirs::data_local_dir().ok_or_else(|| err("无法定位 Windows 应用数据目录。"))?.join("Codex Quick Connect")) }
 fn record_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("provisioning.bin")) }
 fn session_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("session.bin")) }
@@ -61,14 +107,6 @@ unsafe fn dpapi(input: &[u8], protect: bool) -> Result<Vec<u8>, String> {
     let output = std::slice::from_raw_parts(target.pbData, target.cbData as usize).to_vec();
     LocalFree(target.pbData.cast());
     Ok(output)
-}
-
-fn load_record() -> Result<Option<ProvisionedKey>, String> {
-    let path = record_path()?;
-    if !path.exists() { return Ok(None); }
-    let encrypted = fs::read(path).map_err(|_| err("无法读取本机密钥记录。"))?;
-    let plain = unsafe { dpapi(&encrypted, false)? };
-    serde_json::from_slice(&plain).map(Some).map_err(|_| err("本机密钥记录已损坏。"))
 }
 
 fn save_record(record: &ProvisionedKey) -> Result<(), String> {
@@ -237,28 +275,117 @@ async fn list_available_groups(state: State<'_, AppState>) -> Result<Vec<Availab
 }
 
 #[tauri::command]
-async fn enable_codex(state: State<'_, AppState>, group_id: i64) -> Result<EnableResult, String> {
+async fn list_group_keys(state: State<'_, AppState>, group_id: i64) -> Result<Vec<AvailableKey>, String> {
+    if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
+    let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
+    let keys = get_group_keys(&Client::new(), &session.access_token, group_id).await?;
+    Ok(keys.iter().map(ApiKey::available).collect())
+}
+
+#[tauri::command]
+async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<i64>) -> Result<EnableResult, String> {
     if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
     let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
     let client = Client::new(); let account = get_account(&client, &session.access_token).await?;
-    let (record, key_created) = match load_record()? {
-        Some(mut record) => {
-            let _: Value = request_json(client.put(format!("{API_BASE}/keys/{}", record.id)).bearer_auth(&session.access_token).json(&UpdateKeyGroupRequest { group_id })).await?;
-            record.group_id = Some(group_id);
-            (record, false)
+    let (api_key, key_created) = if let Some(key_id) = key_id {
+        if key_id <= 0 { return Err(err("请选择有效的 API 密钥。")); }
+        let key: ApiKey = request_json(client.get(format!("{API_BASE}/keys/{key_id}")).bearer_auth(&session.access_token)).await?;
+        if key.id != key_id || !key.usable_for_group(group_id) {
+            return Err(err("所选密钥不属于当前分组或已不可用，请重新加载密钥。"));
         }
-        None => {
-            let api_key: ApiKey = request_json(client.post(format!("{API_BASE}/keys")).bearer_auth(&session.access_token).json(&CreateKeyRequest { name: KEY_NAME, group_id })).await?;
-            (ProvisionedKey { id: api_key.id, secret: api_key.key, group_id: Some(group_id) }, true)
+        (key, false)
+    } else {
+        // Recheck the group to avoid creating another dedicated key after a failed local write.
+        let existing = get_group_keys(&client, &session.access_token, group_id).await?
+            .into_iter().find(|key| key.name == KEY_NAME);
+        match existing {
+            Some(key) => (key, false),
+            None => {
+                let key: ApiKey = request_json(client.post(format!("{API_BASE}/keys")).bearer_auth(&session.access_token).json(&CreateKeyRequest { name: KEY_NAME, group_id })).await?;
+                if !key.usable_for_group(group_id) { return Err(err("新建密钥不可用，请重新加载密钥后重试。")); }
+                (key, true)
+            }
         }
     };
+    let key = api_key.available();
+    let record = ProvisionedKey { id: api_key.id, secret: api_key.key, group_id: Some(group_id) };
     let backup_path = write_codex(&record.secret)?;
     save_record(&record)?;
-    Ok(EnableResult { balance: account.balance, key_created, backup_path })
+    Ok(EnableResult { balance: account.balance, key_created, backup_path, key })
 }
 
 #[tauri::command]
 fn logout(state: State<'_, AppState>) -> Result<(), String> { clear_session()?; clear_saved_credentials()?; *state.session.lock().map_err(|_| err("应用会话不可用。"))? = None; Ok(()) }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, restore_original_codex_config, restore_session, list_available_groups, enable_codex, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
+pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, restore_original_codex_config, restore_session, list_available_groups, list_group_keys, enable_codex, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "Requires a saved login and CODEX_QUICK_CONNECT_TEST_GROUP; performs read-only API requests"]
+    fn live_group_keys_contract() {
+        let group_id: i64 = std::env::var("CODEX_QUICK_CONNECT_TEST_GROUP").expect("Set a group containing an existing key").parse().unwrap();
+        let session = load_session().unwrap().expect("Sign in to the desktop app first");
+        let keys = tauri::async_runtime::block_on(get_group_keys(&Client::new(), &session.access_token, group_id)).unwrap();
+        assert!(!keys.is_empty(), "Expected an existing usable key in the test group");
+        assert!(keys.iter().all(|key| key.usable_for_group(group_id)));
+        println!("Read-only group lookup returned {} usable key(s)", keys.len());
+    }
+
+    fn active_key() -> ApiKey {
+        serde_json::from_value(serde_json::json!({
+            "id": 12, "name": "test", "key": "sk-test-only-1234", "group_id": 7,
+            "status": "active", "expires_at": null, "quota": 0, "quota_used": 0
+        })).unwrap()
+    }
+
+    #[test]
+    fn rejects_keys_outside_the_selected_group() {
+        let mut key = active_key();
+        assert!(key.usable_for_group(7));
+        assert!(!key.usable_for_group(8));
+        key.group_id = None;
+        assert!(!key.usable_for_group(7));
+    }
+
+    #[test]
+    fn rejects_disabled_expired_or_exhausted_keys() {
+        let mut key = active_key();
+        key.status = "inactive".to_owned();
+        assert!(!key.usable_for_group(7));
+        key.status = "active".to_owned();
+        key.expires_at = Some((chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339());
+        assert!(!key.usable_for_group(7));
+        key.expires_at = Some((chrono::Utc::now() + chrono::Duration::days(1)).to_rfc3339());
+        assert!(key.usable_for_group(7));
+        key.quota = 10.0;
+        key.quota_used = 10.0;
+        assert!(!key.usable_for_group(7));
+        key.quota_used = 9.0;
+        assert!(key.usable_for_group(7));
+    }
+
+    #[test]
+    fn rejects_missing_secrets_and_invalid_expiration() {
+        let mut key = active_key();
+        key.key = " ".to_owned();
+        assert!(!key.usable_for_group(7));
+        key.key = "sk-test-only-1234".to_owned();
+        key.expires_at = Some("invalid".to_owned());
+        assert!(!key.usable_for_group(7));
+    }
+
+    #[test]
+    fn key_list_does_not_expose_the_secret() {
+        let mut key = active_key();
+        let visible = serde_json::to_value(key.available()).unwrap();
+        assert_eq!(visible["preview"], "••••1234");
+        assert!(visible.get("key").is_none());
+        assert!(!visible.to_string().contains(&key.key));
+        key.key = "short".to_owned();
+        assert_eq!(key.available().preview, "••••");
+    }
+}

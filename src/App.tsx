@@ -3,7 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import "./App.css";
 
 type Account = { email: string; balance: number };
-type EnableResult = { balance: number; key_created: boolean; backup_path: string };
+type AvailableKey = { id: number; name: string; preview: string };
+type EnableResult = { balance: number; key_created: boolean; backup_path: string; key: AvailableKey };
 type RestoreResult = { backup_path: string; rollback_path: string };
 type KeyGroup = { id: number; name: string; platform: string };
 type SavedCredentials = { email: string; password: string };
@@ -21,9 +22,19 @@ export default function App() {
   const [error, setError] = useState("");
   const [groups, setGroups] = useState<KeyGroup[]>([]);
   const [selectedGroupId, setSelectedGroupId] = useState("");
-  const [groupDialogOpen, setGroupDialogOpen] = useState(false);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [groupError, setGroupError] = useState("");
+  const [groupLoadAttempt, setGroupLoadAttempt] = useState(0);
+  const [groupKeys, setGroupKeys] = useState<AvailableKey[]>([]);
+  const [selectedKeyId, setSelectedKeyId] = useState("");
+  const [loadedKeyGroupId, setLoadedKeyGroupId] = useState("");
+  const [keysLoading, setKeysLoading] = useState(false);
+  const [keyError, setKeyError] = useState("");
+  const [keyLoadAttempt, setKeyLoadAttempt] = useState(0);
   const [restoringSession, setRestoringSession] = useState(true);
   const [rememberCredentials, setRememberCredentials] = useState(false);
+  const accountEmail = account?.email;
+  const keysReady = !!selectedGroupId && loadedKeyGroupId === selectedGroupId && !keysLoading && !keyError;
 
   useEffect(() => {
     let active = true;
@@ -45,6 +56,62 @@ export default function App() {
     return () => { active = false; };
   }, []);
 
+  useEffect(() => {
+    if (!accountEmail) return;
+    let active = true;
+    setGroups([]);
+    setSelectedGroupId("");
+    setGroupError("");
+    setGroupsLoading(true);
+
+    async function loadGroups() {
+      try {
+        const availableGroups = await invoke<KeyGroup[]>("list_available_groups");
+        if (!active) return;
+        setGroups(availableGroups);
+        if (availableGroups.length === 0) {
+          setGroupError("当前账户没有可用的密钥分组，请先在中转站后台配置分组权限。");
+        }
+      } catch (reason) {
+        if (active) setGroupError(String(reason));
+      } finally {
+        if (active) setGroupsLoading(false);
+      }
+    }
+
+    void loadGroups();
+    return () => { active = false; };
+  }, [accountEmail, groupLoadAttempt]);
+
+  useEffect(() => {
+    let active = true;
+    setGroupKeys([]);
+    setSelectedKeyId("");
+    setLoadedKeyGroupId("");
+    setKeyError("");
+    setKeysLoading(false);
+    if (!accountEmail || !selectedGroupId) return;
+    setKeysLoading(true);
+
+    async function loadKeys() {
+      try {
+        const keys = await invoke<AvailableKey[]>("list_group_keys", { groupId: Number(selectedGroupId) });
+        if (!active) return;
+        setGroupKeys(keys);
+        setLoadedKeyGroupId(selectedGroupId);
+        const preferred = keys.find((key) => key.name === "Codex Quick Connect") ?? keys[0];
+        setSelectedKeyId(preferred ? String(preferred.id) : "create");
+      } catch (reason) {
+        if (active) setKeyError(String(reason));
+      } finally {
+        if (active) setKeysLoading(false);
+      }
+    }
+
+    void loadKeys();
+    return () => { active = false; };
+  }, [accountEmail, selectedGroupId, keyLoadAttempt]);
+
   async function signIn(event: FormEvent) {
     event.preventDefault();
     if (!email.trim() || !password) { setError("请输入邮箱和密码。"); return; }
@@ -64,25 +131,21 @@ export default function App() {
     }
   }
 
-  async function openGroupDialog() {
-    setBusy(true); setError(""); setStatus("正在加载可用密钥分组...");
-    try {
-      const availableGroups = await invoke<KeyGroup[]>("list_available_groups");
-      if (availableGroups.length === 0) { setStatus(""); setError("当前账户没有可用的密钥分组，请先在中转站后台配置分组权限。"); return; }
-      setGroups(availableGroups); setSelectedGroupId(""); setGroupDialogOpen(true); setStatus("");
-    } catch (reason) { setStatus(""); setError(String(reason)); }
-    finally { setBusy(false); }
-  }
-
   async function enable() {
+    if (busy || groupsLoading || !keysReady) return;
     const groupId = Number(selectedGroupId);
-    if (!Number.isInteger(groupId) || groupId <= 0) { setError("请选择密钥分组。"); return; }
-    setBusy(true); setError(""); setStatus("正在创建或恢复专用密钥...");
+    if (!groups.some((group) => group.id === groupId)) { setError("请选择密钥分组。"); return; }
+    const keyId = selectedKeyId === "create" ? null : Number(selectedKeyId);
+    if (keyId === null ? groupKeys.length !== 0 : !groupKeys.some((key) => key.id === keyId)) {
+      setError("请选择当前分组的 API 密钥。"); return;
+    }
+    setBusy(true); setError(""); setStatus("正在配置 Codex...");
     try {
-      const result = await invoke<EnableResult>("enable_codex", { groupId });
+      const result = await invoke<EnableResult>("enable_codex", { groupId, keyId });
       setAccount((current) => current ? { ...current, balance: result.balance } : current);
-      setGroupDialogOpen(false);
-      setStatus(result.key_created ? "已启用 Codex，已创建专用密钥。" : "已启用 Codex，已恢复现有专用密钥。");
+      setGroupKeys((current) => [...current.filter((key) => key.id !== result.key.id), result.key]);
+      setSelectedKeyId(String(result.key.id));
+      setStatus(result.key_created ? "已启用 Codex，已创建专用密钥。" : "已启用 Codex，已使用所选密钥。");
     } catch (reason) { setStatus(""); setError(String(reason)); }
     finally { setBusy(false); }
   }
@@ -97,12 +160,48 @@ export default function App() {
     finally { setBusy(false); }
   }
 
-  async function signOut() { await invoke("logout"); setAccount(null); setPassword(""); setStatus(""); setError(""); setGroupDialogOpen(false); setGroups([]); setSelectedGroupId(""); }
+  async function signOut() { await invoke("logout"); setAccount(null); setPassword(""); setStatus(""); setError(""); setGroups([]); setSelectedGroupId(""); setGroupError(""); setGroupsLoading(false); setGroupKeys([]); setSelectedKeyId(""); setLoadedKeyGroupId(""); setKeyError(""); setKeysLoading(false); }
 
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">C</span><span>Codex Quick Connect</span></div>{account && <button className="quiet-button" type="button" onClick={signOut} aria-label="退出登录">退出</button>}</header>
-    {restoringSession ? <section className="content login-view"><div className="eyebrow">XIMUAI CODEX</div><h1>正在恢复登录...</h1><p className="subtle">正在验证本机加密会话。</p></section> : !account ? <section className="content login-view" aria-labelledby="login-title"><div className="eyebrow">XIMUAI CODEX</div><h1 id="login-title">连接你的 Codex</h1><p className="subtle">登录后自动创建密钥并配置本机 Codex。</p><form onSubmit={signIn} className="form-stack"><label>邮箱<input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} disabled={busy} /></label><label>密码<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={busy} /></label><label className="remember-option"><input type="checkbox" checked={rememberCredentials} onChange={(event) => void toggleRememberCredentials(event.target.checked)} disabled={busy} />保存账号和密码</label><button className="primary-button" disabled={busy} type="submit">{busy ? "正在连接..." : "登录"}</button></form></section> : <section className="content connected-view" aria-labelledby="account-title"><div className="connection-chip">已连接</div><h1 id="account-title">{account.email}</h1><div className="balance-panel"><span>API 账户余额</span><strong>{formatBalance(account.balance)}</strong></div><button className="primary-button enable-button" onClick={openGroupDialog} disabled={busy} type="button">{busy ? "正在加载..." : "启用 Codex"}</button><p className="subtle configuration-note">启用会备份并替换当前 Codex 配置。</p><button className="secondary-button restore-button" onClick={() => void restoreOriginalCodexConfig()} disabled={busy} type="button">恢复原 Codex 配置</button></section>}
-    {groupDialogOpen && <div className="dialog-backdrop" role="presentation"><section className="group-dialog" role="dialog" aria-modal="true" aria-labelledby="group-dialog-title"><h2 id="group-dialog-title">选择密钥分组</h2><p>请选择本次 Codex 连接使用的中转站分组。</p><label>密钥分组<select value={selectedGroupId} onChange={(event) => setSelectedGroupId(event.target.value)} disabled={busy}><option value="" disabled>请选择分组</option>{groups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.platform}）</option>)}</select></label><div className="dialog-actions"><button className="secondary-button" type="button" onClick={() => setGroupDialogOpen(false)} disabled={busy}>取消</button><button className="primary-button confirm-button" type="button" onClick={enable} disabled={busy || !selectedGroupId}>{busy ? "正在启用..." : "确认启用"}</button></div></section></div>}
+    {restoringSession ? <section className="content login-view"><div className="eyebrow">XIMUAI CODEX</div><h1>正在恢复登录...</h1><p className="subtle">正在验证本机加密会话。</p></section> : !account ? <section className="content login-view" aria-labelledby="login-title"><div className="eyebrow">XIMUAI CODEX</div><h1 id="login-title">连接你的 Codex</h1><p className="subtle">登录后选择密钥分组，一键配置本机 Codex。</p><form onSubmit={signIn} className="form-stack"><label>邮箱<input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} disabled={busy} /></label><label>密码<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={busy} /></label><label className="remember-option"><input type="checkbox" checked={rememberCredentials} onChange={(event) => void toggleRememberCredentials(event.target.checked)} disabled={busy} />保存账号和密码</label><button className="primary-button" disabled={busy} type="submit">{busy ? "正在连接..." : "登录"}</button></form></section> : <section className="content connected-view" aria-labelledby="account-title">
+      <div className="connection-chip">已连接</div>
+      <h1 id="account-title">{account.email}</h1>
+      <div className="balance-panel"><span>API 账户余额</span><strong>{formatBalance(account.balance)}</strong></div>
+      <div className="group-field" aria-busy={groupsLoading}>
+        <label htmlFor="key-group">密钥分组</label>
+        <select
+          id="key-group"
+          value={selectedGroupId}
+          onChange={(event) => { setSelectedGroupId(event.target.value); setSelectedKeyId(""); setError(""); setStatus(""); }}
+          disabled={busy || groupsLoading || groups.length === 0}
+          aria-describedby={groupError ? "group-error" : undefined}
+        >
+          <option value="" disabled>{groupsLoading ? "正在加载分组..." : groups.length === 0 ? "暂无可用分组" : "请选择分组"}</option>
+          {groups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.platform}）</option>)}
+        </select>
+        {groupError && <div className="group-feedback">
+          <p id="group-error" role="alert">{groupError}</p>
+          <button className="quiet-button" type="button" onClick={() => setGroupLoadAttempt((attempt) => attempt + 1)} disabled={busy || groupsLoading}>重新加载分组</button>
+        </div>}
+      </div>
+      {selectedGroupId && <div className="group-field" aria-busy={keysLoading}>
+        <div className="field-heading">
+          <label htmlFor="api-key">API 密钥</label>
+          <button className="quiet-button refresh-keys" type="button" onClick={() => setKeyLoadAttempt((attempt) => attempt + 1)} disabled={busy || keysLoading} aria-label="重新加载密钥">{keyError ? "重新加载" : "刷新"}</button>
+        </div>
+        <select id="api-key" value={selectedKeyId} onChange={(event) => setSelectedKeyId(event.target.value)} disabled={busy || !keysReady} aria-describedby={keyError ? "key-error" : groupKeys.length === 0 && keysReady ? "key-hint" : undefined}>
+          {!keysReady && <option value="" disabled>{keyError ? "密钥加载失败" : "正在加载密钥..."}</option>}
+          {keysReady && groupKeys.length === 0 && <option value="create">创建专用密钥</option>}
+          {keysReady && groupKeys.map((key) => <option key={key.id} value={key.id}>{key.name || "未命名密钥"}（{key.preview}）</option>)}
+        </select>
+        {keyError && <div className="group-feedback"><p id="key-error" role="alert">{keyError}</p></div>}
+        {keysReady && groupKeys.length === 0 && <p id="key-hint" className="subtle key-hint">当前分组没有可用密钥，启用时将创建专用密钥。</p>}
+      </div>}
+      <button className="primary-button enable-button" onClick={enable} disabled={busy || groupsLoading || !keysReady || !selectedKeyId} type="button">{busy ? "正在处理..." : "启用 Codex"}</button>
+      <p className="subtle configuration-note">启用会备份并替换当前 Codex 配置。</p>
+      <button className="secondary-button restore-button" onClick={() => void restoreOriginalCodexConfig()} disabled={busy} type="button">恢复原 Codex 配置</button>
+    </section>}
     <footer aria-live="polite" className={error ? "message error" : "message"}>{error || status || "https://codex.ximuai.com"}</footer>
   </main>;
 }
