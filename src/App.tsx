@@ -1,16 +1,14 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { DEFAULT_MODEL, MODELS, loadSelection, saveSelection, type Selection } from "./selection";
 import "./App.css";
 
 type Account = { email: string; balance: number };
 type AvailableKey = { id: number; name: string; preview: string };
-type EnableResult = { balance: number; key_created: boolean; backup_path: string; key: AvailableKey };
-type RestoreResult = { backup_path: string; rollback_path: string };
+type EnableResult = { balance: number; key_created: boolean; key: AvailableKey; launch_error: string | null };
+type ResetLoginResult = { launch_error: string | null };
 type KeyGroup = { id: number; name: string; platform: string };
 type SavedCredentials = { email: string; password: string };
-
-const DEFAULT_MODEL = "gpt-6.1-sol";
-const MODELS = [DEFAULT_MODEL, "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"];
 
 function formatBalance(value: number) {
   return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD" }).format(value);
@@ -35,10 +33,25 @@ export default function App() {
   const [keyError, setKeyError] = useState("");
   const [keyLoadAttempt, setKeyLoadAttempt] = useState(0);
   const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
+  const [groupNotice, setGroupNotice] = useState("");
+  const [keyNotice, setKeyNotice] = useState("");
+  const [selectionError, setSelectionError] = useState("");
+  const savedSelection = useRef<Selection | null>(null);
   const [restoringSession, setRestoringSession] = useState(true);
   const [rememberCredentials, setRememberCredentials] = useState(false);
   const accountEmail = account?.email;
   const keysReady = !!selectedGroupId && loadedKeyGroupId === selectedGroupId && !keysLoading && !keyError;
+
+  function rememberSelection(selection: Selection) {
+    if (!accountEmail) return;
+    savedSelection.current = selection;
+    try {
+      saveSelection(window.localStorage, accountEmail, selection);
+      setSelectionError("");
+    } catch {
+      setSelectionError("本次选择可正常使用，但无法保存，下次打开时需要重新选择。");
+    }
+  }
 
   useEffect(() => {
     let active = true;
@@ -66,6 +79,15 @@ export default function App() {
     setGroups([]);
     setSelectedGroupId("");
     setGroupError("");
+    setGroupNotice("");
+    setSelectionError("");
+    savedSelection.current = null;
+    try {
+      savedSelection.current = loadSelection(window.localStorage, accountEmail);
+    } catch {
+      setSelectionError("无法读取上次选择，请重新选择分组、密钥和模型。");
+    }
+    setSelectedModel(savedSelection.current?.model ?? DEFAULT_MODEL);
     setGroupsLoading(true);
 
     async function loadGroups() {
@@ -76,6 +98,14 @@ export default function App() {
         setGroups(openAIGroups);
         if (openAIGroups.length === 0) {
           setGroupError("当前账户没有可用的 OpenAI 密钥分组，请先在中转站后台配置分组权限。");
+        }
+        const saved = savedSelection.current;
+        if (saved?.groupId) {
+          if (openAIGroups.some((group) => String(group.id) === saved.groupId)) {
+            setSelectedGroupId(saved.groupId);
+          } else {
+            setGroupNotice("上次选择的分组已不可用，请重新选择分组。");
+          }
         }
       } catch (reason) {
         if (active) setGroupError(String(reason));
@@ -94,6 +124,7 @@ export default function App() {
     setSelectedKeyId("");
     setLoadedKeyGroupId("");
     setKeyError("");
+    setKeyNotice("");
     setKeysLoading(false);
     if (!accountEmail || !selectedGroupId) return;
     setKeysLoading(true);
@@ -104,8 +135,16 @@ export default function App() {
         if (!active) return;
         setGroupKeys(keys);
         setLoadedKeyGroupId(selectedGroupId);
-        const preferred = keys.find((key) => key.name === "西牧ai") ?? keys[0];
-        setSelectedKeyId(preferred ? String(preferred.id) : "create");
+        const saved = savedSelection.current;
+        const savedKeyId = saved?.groupId === selectedGroupId ? saved.keyId : "";
+        const restoredKey = keys.find((key) => String(key.id) === savedKeyId);
+        const preferred = restoredKey ?? keys.find((key) => key.name === "西牧ai") ?? keys[0];
+        const keyId = preferred ? String(preferred.id) : "create";
+        setSelectedKeyId(keyId);
+        if (savedKeyId && savedKeyId !== "create" && !restoredKey) {
+          setKeyNotice(keys.length ? "上次选择的密钥已不可用，已选择其他可用密钥，请确认。" : "上次选择的密钥已不可用，启动时将创建“西牧ai”密钥。");
+        }
+        rememberSelection({ groupId: selectedGroupId, keyId, model: saved?.model ?? DEFAULT_MODEL });
       } catch (reason) {
         if (active) setKeyError(String(reason));
       } finally {
@@ -144,28 +183,40 @@ export default function App() {
     if (keyId === null ? groupKeys.length !== 0 : !groupKeys.some((key) => key.id === keyId)) {
       setError("请选择当前分组的 API 密钥。"); return;
     }
-    setBusy(true); setError(""); setStatus("正在配置 Codex...");
+    setBusy(true); setError(""); setStatus("正在保存配置并重新启动 ChatGPT...");
     try {
       const result = await invoke<EnableResult>("enable_codex", { groupId, keyId, model: selectedModel });
       setAccount((current) => current ? { ...current, balance: result.balance } : current);
       setGroupKeys((current) => [...current.filter((key) => key.id !== result.key.id), result.key]);
       setSelectedKeyId(String(result.key.id));
-      setStatus(result.key_created ? "已启用 Codex，已创建“西牧ai”密钥。" : "已启用 Codex，已使用所选密钥。");
+      setKeyNotice("");
+      rememberSelection({ groupId: selectedGroupId, keyId: String(result.key.id), model: selectedModel });
+      if (result.launch_error) {
+        setStatus("");
+        setError(`配置已保存，但客户端未能按新配置启动：${result.launch_error}`);
+      } else {
+        setStatus(result.key_created ? "ChatGPT 已启动，已创建“西牧ai”密钥。" : "ChatGPT 已启动，已使用所选密钥。");
+      }
     } catch (reason) { setStatus(""); setError(String(reason)); }
     finally { setBusy(false); }
   }
 
-  async function restoreOriginalCodexConfig() {
-    if (!window.confirm("将使用第一次启用前的 Codex 配置覆盖当前配置，恢复后请重启 Codex。是否继续？")) return;
-    setBusy(true); setError(""); setStatus("正在恢复原 Codex 配置...");
+  async function resetChatGPTLogin() {
+    if (!window.confirm("将关闭并重新打开 ChatGPT，清除客户端当前登录信息并恢复默认连接设置。客户端中正在进行的任务会中断，共用该登录缓存的 CLI/IDE 后续也需要重新登录。是否继续？")) return;
+    setBusy(true); setError(""); setStatus("正在重置 ChatGPT 登录状态...");
     try {
-      await invoke<RestoreResult>("restore_original_codex_config");
-      setStatus("已恢复原 Codex 配置，请完全退出并重新打开 Codex。");
+      const result = await invoke<ResetLoginResult>("reset_chatgpt_login");
+      if (result.launch_error) {
+        setStatus("");
+        setError(`登录状态已重置，请手动打开 ChatGPT 重新登录：${result.launch_error}`);
+      } else {
+        setStatus("ChatGPT 登录状态已重置，客户端已重新打开，请重新登录。");
+      }
     } catch (reason) { setStatus(""); setError(String(reason)); }
     finally { setBusy(false); }
   }
 
-  async function signOut() { await invoke("logout"); setAccount(null); setPassword(""); setStatus(""); setError(""); setGroups([]); setSelectedGroupId(""); setGroupError(""); setGroupsLoading(false); setGroupKeys([]); setSelectedKeyId(""); setLoadedKeyGroupId(""); setKeyError(""); setKeysLoading(false); setSelectedModel(DEFAULT_MODEL); }
+  async function signOut() { await invoke("logout"); setAccount(null); setPassword(""); setStatus(""); setError(""); setGroups([]); setSelectedGroupId(""); setGroupError(""); setGroupNotice(""); setGroupsLoading(false); setGroupKeys([]); setSelectedKeyId(""); setLoadedKeyGroupId(""); setKeyError(""); setKeyNotice(""); setSelectionError(""); savedSelection.current = null; setKeysLoading(false); setSelectedModel(DEFAULT_MODEL); }
 
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">C</span><span>Codex Quick Connect</span></div>{account && <button className="quiet-button" type="button" onClick={signOut} aria-label="退出登录">退出</button>}</header>
@@ -178,13 +229,14 @@ export default function App() {
         <select
           id="key-group"
           value={selectedGroupId}
-          onChange={(event) => { setSelectedGroupId(event.target.value); setSelectedKeyId(""); setError(""); setStatus(""); }}
+          onChange={(event) => { const groupId = event.target.value; setSelectedGroupId(groupId); setSelectedKeyId(""); setGroupNotice(""); setError(""); setStatus(""); rememberSelection({ groupId, keyId: "", model: selectedModel }); }}
           disabled={busy || groupsLoading || groups.length === 0}
           aria-describedby={groupError ? "group-error" : undefined}
         >
           <option value="" disabled>{groupsLoading ? "正在加载分组..." : groups.length === 0 ? "暂无可用 OpenAI 分组" : "请选择分组"}</option>
           {groups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.platform}）</option>)}
         </select>
+        {groupNotice && <p className="subtle key-hint" role="status">{groupNotice}</p>}
         {groupError && <div className="group-feedback">
           <p id="group-error" role="alert">{groupError}</p>
           <button className="quiet-button" type="button" onClick={() => setGroupLoadAttempt((attempt) => attempt + 1)} disabled={busy || groupsLoading}>重新加载分组</button>
@@ -195,23 +247,25 @@ export default function App() {
           <label htmlFor="api-key">API 密钥</label>
           <button className="quiet-button refresh-keys" type="button" onClick={() => setKeyLoadAttempt((attempt) => attempt + 1)} disabled={busy || keysLoading} aria-label="重新加载密钥">{keyError ? "重新加载" : "刷新"}</button>
         </div>
-        <select id="api-key" value={selectedKeyId} onChange={(event) => setSelectedKeyId(event.target.value)} disabled={busy || !keysReady} aria-describedby={keyError ? "key-error" : groupKeys.length === 0 && keysReady ? "key-hint" : undefined}>
+        <select id="api-key" value={selectedKeyId} onChange={(event) => { const keyId = event.target.value; setSelectedKeyId(keyId); setKeyNotice(""); rememberSelection({ groupId: selectedGroupId, keyId, model: selectedModel }); }} disabled={busy || !keysReady} aria-describedby={keyError ? "key-error" : groupKeys.length === 0 && keysReady ? "key-hint" : undefined}>
           {!keysReady && <option value="" disabled>{keyError ? "密钥加载失败" : "正在加载密钥..."}</option>}
           {keysReady && groupKeys.length === 0 && <option value="create">创建“西牧ai”密钥</option>}
           {keysReady && groupKeys.map((key) => <option key={key.id} value={key.id}>{key.name || "未命名密钥"}（{key.preview}）</option>)}
         </select>
         {keyError && <div className="group-feedback"><p id="key-error" role="alert">{keyError}</p></div>}
+        {keyNotice && <p className="subtle key-hint" role="status">{keyNotice}</p>}
         {keysReady && groupKeys.length === 0 && <p id="key-hint" className="subtle key-hint">当前分组没有可用密钥，启用时将创建名为“西牧ai”的密钥。</p>}
       </div>}
       {selectedGroupId && <div className="group-field">
         <label htmlFor="codex-model">模型</label>
-        <select id="codex-model" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={busy}>
+        <select id="codex-model" value={selectedModel} onChange={(event) => { const model = event.target.value; setSelectedModel(model); rememberSelection({ groupId: selectedGroupId, keyId: selectedKeyId || (savedSelection.current?.groupId === selectedGroupId ? savedSelection.current.keyId : ""), model }); }} disabled={busy}>
           {MODELS.map((model) => <option key={model} value={model}>{model}</option>)}
         </select>
       </div>}
+      {selectionError && <p className="subtle key-hint" role="alert">{selectionError}</p>}
       <button className="primary-button enable-button" onClick={enable} disabled={busy || groupsLoading || !keysReady || !selectedKeyId} type="button">{busy ? "正在处理..." : "启动ChatGPT"}</button>
-      <p className="subtle configuration-note">启用会备份并替换当前 Codex 配置。</p>
-      <button className="secondary-button restore-button" onClick={() => void restoreOriginalCodexConfig()} disabled={busy} type="button">恢复原 ChatGPT 配置</button>
+      <p className="subtle configuration-note">保存配置后会重新启动 ChatGPT，正在进行的任务会中断。</p>
+      <button className="secondary-button restore-button" onClick={() => void resetChatGPTLogin()} disabled={busy} type="button">恢复原 ChatGPT 配置</button>
     </section>}
     <footer aria-live="polite" className={error ? "message error" : "message"}>{error || status || "https://codex.ximuai.com"}</footer>
   </main>;

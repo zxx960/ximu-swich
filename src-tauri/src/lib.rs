@@ -1,10 +1,11 @@
-use chrono::Local;
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
 use std::{fs, path::{Path, PathBuf}, ptr::null_mut, sync::Mutex};
 use tauri::State;
 use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN}};
+
+mod client;
 
 const API_BASE: &str = "https://codex.ximuai.com/api/v1";
 const CODEX_BASE_URL: &str = "https://codex.ximuai.com";
@@ -31,8 +32,8 @@ const KEY_NAME: &str = "西牧ai";
 #[derive(Clone, Deserialize, Serialize)] struct AvailableGroup { id: i64, name: String, platform: String }
 #[derive(Serialize)] struct CreateKeyRequest<'a> { name: &'a str, group_id: i64 }
 #[derive(Deserialize, Serialize)] struct ProvisionedKey { id: i64, secret: String, #[serde(default)] group_id: Option<i64> }
-#[derive(Serialize)] struct EnableResult { balance: f64, key_created: bool, backup_path: String, key: AvailableKey }
-#[derive(Serialize)] struct RestoreResult { backup_path: String, rollback_path: String }
+#[derive(Serialize)] struct EnableResult { balance: f64, key_created: bool, key: AvailableKey, launch_error: Option<String> }
+#[derive(Serialize)] struct ResetLoginResult { launch_error: Option<String> }
 
 fn err(message: impl Into<String>) -> String { message.into() }
 
@@ -97,7 +98,6 @@ fn data_dir() -> Result<PathBuf, String> { Ok(dirs::data_local_dir().ok_or_else(
 fn record_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("provisioning.bin")) }
 fn session_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("session.bin")) }
 fn credentials_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("credentials.bin")) }
-fn backups_dir() -> Result<PathBuf, String> { Ok(data_dir()?.join("backups")) }
 
 unsafe fn dpapi(input: &[u8], protect: bool) -> Result<Vec<u8>, String> {
     let mut source = CRYPT_INTEGER_BLOB { cbData: input.len() as u32, pbData: input.as_ptr() as *mut u8 };
@@ -162,59 +162,60 @@ fn clear_saved_credentials() -> Result<(), String> {
 }
 
 fn codex_paths() -> Result<(PathBuf, PathBuf), String> { let dir = dirs::home_dir().ok_or_else(|| err("无法定位用户主目录。"))?.join(".codex"); Ok((dir.join("auth.json"), dir.join("config.toml"))) }
-fn snapshot(path: &Path) -> Result<Option<Vec<u8>>, String> { if path.exists() { fs::read(path).map(Some).map_err(|_| err("无法备份现有 Codex 配置。")) } else { Ok(None) } }
+fn snapshot(path: &Path) -> Result<Option<Vec<u8>>, String> { if path.exists() { fs::read(path).map(Some).map_err(|_| err("无法读取现有 Codex 配置。")) } else { Ok(None) } }
 fn restore(path: &Path, old: &Option<Vec<u8>>) -> Result<(), String> { match old { Some(bytes) => fs::write(path, bytes).map_err(|_| err("无法恢复原 Codex 配置。")), None => { if path.exists() { fs::remove_file(path).map_err(|_| err("无法清理未完成的 Codex 配置。"))?; } Ok(()) } } }
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> { let tmp = path.with_extension("quick-connect.tmp"); fs::write(&tmp, bytes).map_err(|_| err("无法写入 Codex 临时配置。"))?; if path.exists() { fs::remove_file(path).map_err(|_| err("无法替换当前 Codex 配置。"))?; } fs::rename(tmp, path).map_err(|_| err("无法完成 Codex 配置写入。")) }
 
-fn is_timestamped_backup_name(name: &str) -> bool {
-    let bytes = name.as_bytes();
-    bytes.len() == 15 && bytes[8] == b'-' && bytes.iter().enumerate().all(|(index, byte)| index == 8 || byte.is_ascii_digit())
-}
-
-fn find_original_codex_backup() -> Result<PathBuf, String> {
-    let root = backups_dir()?;
-    if !root.exists() { return Err(err("没有找到 Codex 配置备份，无法恢复。")); }
-    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
-    for entry in fs::read_dir(&root).map_err(|_| err("无法读取 Codex 备份目录。"))? {
-        let entry = entry.map_err(|_| err("无法读取 Codex 备份目录。"))?;
-        let path = entry.path();
-        if !path.is_dir() { continue; }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if is_timestamped_backup_name(&name) && path.join("auth.json").is_file() && path.join("config.toml").is_file() {
-            candidates.push((name, path));
+fn reset_login_files(
+    auth_path: &Path,
+    config_path: &Path,
+    stop_client: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let old_auth = snapshot(auth_path)?;
+    let old_config = snapshot(config_path)?;
+    stop_client()?;
+    fs::create_dir_all(config_path.parent().ok_or_else(|| err("无法定位客户端配置目录。"))?)
+        .map_err(|_| err("无法创建客户端配置目录。"))?;
+    // Explicit file storage prevents a previous OS-keyring login from being reused.
+    let result = restore(auth_path, &None)
+        .and_then(|_| write_file(config_path, b"cli_auth_credentials_store = \"file\"\n"));
+    if let Err(error) = result {
+        let auth_restored = restore(auth_path, &old_auth);
+        let config_restored = restore(config_path, &old_config);
+        if auth_restored.is_err() || config_restored.is_err() {
+            return Err(format!("{error} 自动还原失败，请检查客户端配置文件的访问权限。"));
         }
+        return Err(format!("{error} 已还原操作前的配置，请重新打开客户端。"));
     }
-    candidates.sort_by(|left, right| left.0.cmp(&right.0));
-    candidates.into_iter().next().map(|(_, path)| path).ok_or_else(|| err("没有找到同时包含 auth.json 和 config.toml 的原 Codex 配置备份。"))
-}
-
-fn backup_current_codex(prefix: &str, old_auth: &Option<Vec<u8>>, old_config: &Option<Vec<u8>>) -> Result<PathBuf, String> {
-    let backup = backups_dir()?.join(format!("{}-{}", prefix, Local::now().format("%Y%m%d-%H%M%S")));
-    fs::create_dir_all(&backup).map_err(|_| err("无法创建 Codex 备份目录。"))?;
-    if let Some(bytes) = old_auth { fs::write(backup.join("auth.json"), bytes).map_err(|_| err("无法保存 Codex 备份。"))?; }
-    if let Some(bytes) = old_config { fs::write(backup.join("config.toml"), bytes).map_err(|_| err("无法保存 Codex 备份。"))?; }
-    Ok(backup)
+    Ok(())
 }
 
 fn codex_config(model: &str) -> Result<String, String> {
     if !CODEX_MODELS.contains(&model) { return Err(err("请选择有效的模型。")); }
-    let config = format!("model_provider = \"OpenAI\"\nmodel = \"{model}\"\nreview_model = \"{model}\"\nmodel_reasoning_effort = \"xhigh\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\nwindows_wsl_setup_acknowledged = true\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
+    let config = format!("model_provider = \"OpenAI\"\nmodel = \"{model}\"\nreview_model = \"{model}\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\nwindows_wsl_setup_acknowledged = true\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
     toml::from_str::<toml::Table>(&config).map_err(|_| err("生成的 Codex 配置无效。"))?;
     Ok(config)
 }
 
-fn write_codex(key: &str, config: &str) -> Result<String, String> {
+fn write_codex(key: &str, config: &str) -> Result<(), String> {
     let (auth_path, config_path) = codex_paths()?;
+    write_codex_files(&auth_path, &config_path, key, config)
+}
+
+fn write_codex_files(auth_path: &Path, config_path: &Path, key: &str, config: &str) -> Result<(), String> {
     fs::create_dir_all(auth_path.parent().unwrap()).map_err(|_| err("无法创建 Codex 配置目录。"))?;
-    let old_auth = snapshot(&auth_path)?; let old_config = snapshot(&config_path)?;
-    let backup = backups_dir()?.join(Local::now().format("%Y%m%d-%H%M%S").to_string());
-    fs::create_dir_all(&backup).map_err(|_| err("无法创建 Codex 备份目录。"))?;
-    if let Some(bytes) = &old_auth { fs::write(backup.join("auth.json"), bytes).map_err(|_| err("无法保存 Codex 备份。"))?; }
-    if let Some(bytes) = &old_config { fs::write(backup.join("config.toml"), bytes).map_err(|_| err("无法保存 Codex 备份。"))?; }
+    let old_auth = snapshot(auth_path)?; let old_config = snapshot(config_path)?;
     let auth = serde_json::json!({ "OPENAI_API_KEY": key });
-    let result = write_file(&auth_path, serde_json::to_string_pretty(&auth).map_err(|_| err("无法生成认证配置。"))?.as_bytes()).and_then(|_| write_file(&config_path, config.as_bytes()));
-    if let Err(error) = result { let _ = restore(&auth_path, &old_auth); let _ = restore(&config_path, &old_config); return Err(error); }
-    Ok(backup.display().to_string())
+    let result = write_file(auth_path, serde_json::to_string_pretty(&auth).map_err(|_| err("无法生成认证配置。"))?.as_bytes()).and_then(|_| write_file(config_path, config.as_bytes()));
+    if let Err(error) = result {
+        let auth_restored = restore(auth_path, &old_auth);
+        let config_restored = restore(config_path, &old_config);
+        if auth_restored.is_err() || config_restored.is_err() {
+            return Err(format!("{error} 自动还原失败，请检查客户端配置文件的访问权限。"));
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -237,22 +238,14 @@ fn get_saved_credentials() -> Result<Option<SavedCredentials>, String> { load_sa
 fn forget_saved_credentials() -> Result<(), String> { clear_saved_credentials() }
 
 #[tauri::command]
-fn restore_original_codex_config() -> Result<RestoreResult, String> {
-    let backup = find_original_codex_backup()?;
-    let auth = fs::read(backup.join("auth.json")).map_err(|_| err("无法读取原 Codex auth.json 备份。"))?;
-    let config = fs::read(backup.join("config.toml")).map_err(|_| err("无法读取原 Codex config.toml 备份。"))?;
-    let (auth_path, config_path) = codex_paths()?;
-    fs::create_dir_all(auth_path.parent().unwrap()).map_err(|_| err("无法创建 Codex 配置目录。"))?;
-    let old_auth = snapshot(&auth_path)?;
-    let old_config = snapshot(&config_path)?;
-    let rollback = backup_current_codex("restore-rollback", &old_auth, &old_config)?;
-    let result = write_file(&auth_path, &auth).and_then(|_| write_file(&config_path, &config));
-    if let Err(error) = result {
-        let _ = restore(&auth_path, &old_auth);
-        let _ = restore(&config_path, &old_config);
-        return Err(error);
-    }
-    Ok(RestoreResult { backup_path: backup.display().to_string(), rollback_path: rollback.display().to_string() })
+async fn reset_chatgpt_login() -> Result<ResetLoginResult, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let app_id = client::find_client()?;
+        let (auth_path, config_path) = codex_paths()?;
+        reset_login_files(&auth_path, &config_path, || client::stop_client(&app_id))?;
+        let launch_error = client::launch_client(app_id).err();
+        Ok(ResetLoginResult { launch_error })
+    }).await.map_err(|_| err("ChatGPT 登录重置任务异常。"))?
 }
 
 #[tauri::command]
@@ -292,6 +285,8 @@ async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<
     let config = codex_config(&model)?;
     if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
     let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
+    let app_id = tauri::async_runtime::spawn_blocking(client::find_client).await
+        .map_err(|_| err("ChatGPT 客户端检测任务异常。"))??;
     let client = Client::new(); let account = get_account(&client, &session.access_token).await?;
     let (api_key, key_created) = if let Some(key_id) = key_id {
         if key_id <= 0 { return Err(err("请选择有效的 API 密钥。")); }
@@ -315,20 +310,130 @@ async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<
     };
     let key = api_key.available();
     let record = ProvisionedKey { id: api_key.id, secret: api_key.key, group_id: Some(group_id) };
-    let backup_path = write_codex(&record.secret, &config)?;
+    write_codex(&record.secret, &config)?;
     save_record(&record)?;
-    Ok(EnableResult { balance: account.balance, key_created, backup_path, key })
+    let launch_error = match tauri::async_runtime::spawn_blocking(move || {
+        client::stop_client(&app_id)?;
+        client::launch_client(app_id)
+    }).await {
+        Ok(result) => result.err(),
+        Err(_) => Some(err("ChatGPT 客户端重启任务异常。")),
+    };
+    Ok(EnableResult { balance: account.balance, key_created, key, launch_error })
 }
 
 #[tauri::command]
 fn logout(state: State<'_, AppState>) -> Result<(), String> { clear_session()?; clear_saved_credentials()?; *state.session.lock().map_err(|_| err("应用会话不可用。"))? = None; Ok(()) }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, restore_original_codex_config, restore_session, list_available_groups, list_group_keys, enable_codex, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
+pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, reset_chatgpt_login, restore_session, list_available_groups, list_group_keys, enable_codex, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ResetTestDir(PathBuf);
+
+    impl ResetTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("quick-connect-reset-test-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+            fs::create_dir(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for ResetTestDir {
+        fn drop(&mut self) {
+            if self.0.starts_with(std::env::temp_dir())
+                && self.0.file_name().unwrap().to_string_lossy().starts_with("quick-connect-reset-test-") {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+    }
+
+    #[test]
+    fn login_reset_clears_auth_without_creating_backups() {
+        let dir = ResetTestDir::new();
+        let auth = dir.0.join("auth.json");
+        let config = dir.0.join("config.toml");
+        fs::write(&auth, br#"{"OPENAI_API_KEY":"test-only"}"#).unwrap();
+        fs::write(&config, codex_config("gpt-6.1-sol").unwrap()).unwrap();
+        fs::write(dir.0.join("history.jsonl"), "test history").unwrap();
+        reset_login_files(&auth, &config, || Ok(())).unwrap();
+        assert!(!auth.exists());
+        let reset: toml::Table = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(reset["cli_auth_credentials_store"].as_str(), Some("file"));
+        assert!(!reset.contains_key("model_providers"));
+        assert_eq!(fs::read_to_string(dir.0.join("history.jsonl")).unwrap(), "test history");
+        let mut files: Vec<_> = fs::read_dir(&dir.0).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        files.sort();
+        assert_eq!(files, vec![std::ffi::OsString::from("config.toml"), std::ffi::OsString::from("history.jsonl")]);
+    }
+
+    #[test]
+    fn login_reset_initializes_missing_files() {
+        let dir = ResetTestDir::new();
+        let auth = dir.0.join("client/auth.json");
+        let config = dir.0.join("client/config.toml");
+        assert!(reset_login_files(&auth, &config, || Ok(())).is_ok());
+        assert!(!auth.exists());
+        assert!(config.is_file());
+    }
+
+    #[test]
+    fn failed_client_shutdown_keeps_auth_and_config() {
+        let dir = ResetTestDir::new();
+        let auth = dir.0.join("auth.json");
+        let config = dir.0.join("config.toml");
+        fs::write(&auth, "old auth").unwrap();
+        fs::write(&config, "old config").unwrap();
+        assert!(reset_login_files(&auth, &config, || Err("test stop failure".to_owned())).is_err());
+        assert_eq!(fs::read_to_string(&auth).unwrap(), "old auth");
+        assert_eq!(fs::read_to_string(&config).unwrap(), "old config");
+    }
+
+    #[test]
+    fn failed_login_reset_restores_removed_auth() {
+        let dir = ResetTestDir::new();
+        let auth = dir.0.join("auth.json");
+        let config = dir.0.join("config.toml");
+        fs::write(&auth, "old auth").unwrap();
+        fs::write(&config, "old config").unwrap();
+        fs::create_dir(config.with_extension("quick-connect.tmp")).unwrap();
+        assert!(reset_login_files(&auth, &config, || Ok(())).is_err());
+        assert_eq!(fs::read_to_string(&auth).unwrap(), "old auth");
+        assert_eq!(fs::read_to_string(&config).unwrap(), "old config");
+    }
+
+    #[test]
+    fn startup_writes_only_current_config_files() {
+        let dir = ResetTestDir::new();
+        let auth = dir.0.join("auth.json");
+        let config = dir.0.join("config.toml");
+        fs::write(&auth, "old auth").unwrap();
+        fs::write(&config, "old config").unwrap();
+        write_codex_files(&auth, &config, "test-only", &codex_config("gpt-6.1-sol").unwrap()).unwrap();
+        let saved_auth: Value = serde_json::from_slice(&fs::read(&auth).unwrap()).unwrap();
+        assert_eq!(saved_auth["OPENAI_API_KEY"], "test-only");
+        let saved_config: toml::Table = toml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
+        assert_eq!(saved_config["model"].as_str(), Some("gpt-6.1-sol"));
+        let mut files: Vec<_> = fs::read_dir(&dir.0).unwrap().map(|entry| entry.unwrap().file_name()).collect();
+        files.sort();
+        assert_eq!(files, vec![std::ffi::OsString::from("auth.json"), std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[test]
+    fn startup_write_failure_restores_previous_config_from_memory() {
+        let dir = ResetTestDir::new();
+        let auth = dir.0.join("auth.json");
+        let config = dir.0.join("config.toml");
+        fs::write(&auth, "old auth").unwrap();
+        fs::write(&config, "old config").unwrap();
+        fs::create_dir(config.with_extension("quick-connect.tmp")).unwrap();
+        assert!(write_codex_files(&auth, &config, "test-only", &codex_config("gpt-6.1-sol").unwrap()).is_err());
+        assert_eq!(fs::read_to_string(&auth).unwrap(), "old auth");
+        assert_eq!(fs::read_to_string(&config).unwrap(), "old config");
+    }
 
     #[test]
     fn selected_model_is_used_for_both_model_settings() {
@@ -336,6 +441,7 @@ mod tests {
             let config: toml::Table = toml::from_str(&codex_config(model).unwrap()).unwrap();
             assert_eq!(config["model"].as_str(), Some(*model));
             assert_eq!(config["review_model"].as_str(), Some(*model));
+            assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
             assert_eq!(config["model_providers"]["OpenAI"]["wire_api"].as_str(), Some("responses"));
         }
     }
