@@ -1,0 +1,9 @@
+Source snapshot for the desktop Codex Quick Connect build, 2026-08-17 02:00:23 America/New_York.
+Desktop EXE SHA-256: 65DD9DD6706CFF20293EAAD2AE6A6C8179A5E3DABCBF81841B6E66D3BE4C9CF8
+The existing target/release executable has the identical SHA-256. All included project files predate that build.
+The project-root EXE is older and excluded. A clean rebuild was not performed; byte-for-byte reproducibility is not claimed.
+Build prerequisites: Node.js, pnpm, Rust, Windows MSVC build tools, WebView2.
+Build commands from project directory:
+  pnpm install --frozen-lockfile
+  pnpm tauri build
+SOURCE-SHA256.json records original file hashes.
