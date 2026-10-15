@@ -1,4 +1,4 @@
-# Codex Quick Connect
+# 西牧ai
 
 一个免安装的 Windows 桌面工具，用于登录 XimuAI 账户、选择密钥分组，并自动配置本机 Codex。基于 Tauri 2、React、TypeScript 和 Rust 开发。
 
@@ -12,7 +12,7 @@
 
 ## 使用
 
-1. 双击 `Codex Quick Connect.exe`。
+1. 双击 `西牧ai.exe`。
 2. 输入 XimuAI 的邮箱和密码并登录；可按需勾选“保存账号和密码”。
 3. 确认显示的 API 账户余额；登录或恢复会话后，程序会自动加载可用密钥分组，下拉框仅显示平台为 OpenAI 的分组。
 4. 在余额下方选择密钥分组，程序会自动拉取该分组的可用 API 密钥；确认或选择密钥后，在其下方选择模型（默认 `gpt-6.1-sol`），再点击“启动ChatGPT”。若该分组没有可用密钥，启动前会创建专用密钥。
@@ -99,7 +99,7 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-Rust release 产物位于 `src-tauri\target\release`（未自定义 Cargo 输出目录时）。当前 Tauri 配置的 `bundle.targets` 为空，不生成安装包。
+Rust release 产物为 `src-tauri\target\release\西牧ai.exe`（未自定义 Cargo 输出目录时）。当前 Tauri 配置的 `bundle.targets` 为空，不生成安装包。
 
 其他常用命令：
 

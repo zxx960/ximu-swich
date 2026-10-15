@@ -1,7 +1,7 @@
 [package]
 name = "codex-quick-connect"
 version = "0.1.0"
-description = "A compact Codex relay connector"
+description = "西牧ai"
 authors = ["Codex"]
 edition = "2021"
 
