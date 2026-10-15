@@ -203,15 +203,15 @@ export default function App() {
         {keyError && <div className="group-feedback"><p id="key-error" role="alert">{keyError}</p></div>}
         {keysReady && groupKeys.length === 0 && <p id="key-hint" className="subtle key-hint">当前分组没有可用密钥，启用时将创建名为“西牧ai”的密钥。</p>}
       </div>}
-      <div className="group-field">
+      {selectedGroupId && <div className="group-field">
         <label htmlFor="codex-model">模型</label>
         <select id="codex-model" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={busy}>
           {MODELS.map((model) => <option key={model} value={model}>{model}</option>)}
         </select>
-      </div>
-      <button className="primary-button enable-button" onClick={enable} disabled={busy || groupsLoading || !keysReady || !selectedKeyId} type="button">{busy ? "正在处理..." : "启用 Codex"}</button>
+      </div>}
+      <button className="primary-button enable-button" onClick={enable} disabled={busy || groupsLoading || !keysReady || !selectedKeyId} type="button">{busy ? "正在处理..." : "启动ChatGPT"}</button>
       <p className="subtle configuration-note">启用会备份并替换当前 Codex 配置。</p>
-      <button className="secondary-button restore-button" onClick={() => void restoreOriginalCodexConfig()} disabled={busy} type="button">恢复原 Codex 配置</button>
+      <button className="secondary-button restore-button" onClick={() => void restoreOriginalCodexConfig()} disabled={busy} type="button">恢复原 ChatGPT 配置</button>
     </section>}
     <footer aria-live="polite" className={error ? "message error" : "message"}>{error || status || "https://codex.ximuai.com"}</footer>
   </main>;
