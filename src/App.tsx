@@ -9,6 +9,9 @@ type RestoreResult = { backup_path: string; rollback_path: string };
 type KeyGroup = { id: number; name: string; platform: string };
 type SavedCredentials = { email: string; password: string };
 
+const DEFAULT_MODEL = "gpt-6.1-sol";
+const MODELS = [DEFAULT_MODEL, "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"];
+
 function formatBalance(value: number) {
   return new Intl.NumberFormat("zh-CN", { style: "currency", currency: "USD" }).format(value);
 }
@@ -31,6 +34,7 @@ export default function App() {
   const [keysLoading, setKeysLoading] = useState(false);
   const [keyError, setKeyError] = useState("");
   const [keyLoadAttempt, setKeyLoadAttempt] = useState(0);
+  const [selectedModel, setSelectedModel] = useState(DEFAULT_MODEL);
   const [restoringSession, setRestoringSession] = useState(true);
   const [rememberCredentials, setRememberCredentials] = useState(false);
   const accountEmail = account?.email;
@@ -68,9 +72,10 @@ export default function App() {
       try {
         const availableGroups = await invoke<KeyGroup[]>("list_available_groups");
         if (!active) return;
-        setGroups(availableGroups);
-        if (availableGroups.length === 0) {
-          setGroupError("当前账户没有可用的密钥分组，请先在中转站后台配置分组权限。");
+        const openAIGroups = availableGroups.filter((group) => group.platform.trim().toLowerCase() === "openai");
+        setGroups(openAIGroups);
+        if (openAIGroups.length === 0) {
+          setGroupError("当前账户没有可用的 OpenAI 密钥分组，请先在中转站后台配置分组权限。");
         }
       } catch (reason) {
         if (active) setGroupError(String(reason));
@@ -99,7 +104,7 @@ export default function App() {
         if (!active) return;
         setGroupKeys(keys);
         setLoadedKeyGroupId(selectedGroupId);
-        const preferred = keys.find((key) => key.name === "Codex Quick Connect") ?? keys[0];
+        const preferred = keys.find((key) => key.name === "西牧ai") ?? keys[0];
         setSelectedKeyId(preferred ? String(preferred.id) : "create");
       } catch (reason) {
         if (active) setKeyError(String(reason));
@@ -141,11 +146,11 @@ export default function App() {
     }
     setBusy(true); setError(""); setStatus("正在配置 Codex...");
     try {
-      const result = await invoke<EnableResult>("enable_codex", { groupId, keyId });
+      const result = await invoke<EnableResult>("enable_codex", { groupId, keyId, model: selectedModel });
       setAccount((current) => current ? { ...current, balance: result.balance } : current);
       setGroupKeys((current) => [...current.filter((key) => key.id !== result.key.id), result.key]);
       setSelectedKeyId(String(result.key.id));
-      setStatus(result.key_created ? "已启用 Codex，已创建专用密钥。" : "已启用 Codex，已使用所选密钥。");
+      setStatus(result.key_created ? "已启用 Codex，已创建“西牧ai”密钥。" : "已启用 Codex，已使用所选密钥。");
     } catch (reason) { setStatus(""); setError(String(reason)); }
     finally { setBusy(false); }
   }
@@ -160,7 +165,7 @@ export default function App() {
     finally { setBusy(false); }
   }
 
-  async function signOut() { await invoke("logout"); setAccount(null); setPassword(""); setStatus(""); setError(""); setGroups([]); setSelectedGroupId(""); setGroupError(""); setGroupsLoading(false); setGroupKeys([]); setSelectedKeyId(""); setLoadedKeyGroupId(""); setKeyError(""); setKeysLoading(false); }
+  async function signOut() { await invoke("logout"); setAccount(null); setPassword(""); setStatus(""); setError(""); setGroups([]); setSelectedGroupId(""); setGroupError(""); setGroupsLoading(false); setGroupKeys([]); setSelectedKeyId(""); setLoadedKeyGroupId(""); setKeyError(""); setKeysLoading(false); setSelectedModel(DEFAULT_MODEL); }
 
   return <main className="app-shell">
     <header className="topbar"><div className="brand"><span className="brand-mark">C</span><span>Codex Quick Connect</span></div>{account && <button className="quiet-button" type="button" onClick={signOut} aria-label="退出登录">退出</button>}</header>
@@ -177,7 +182,7 @@ export default function App() {
           disabled={busy || groupsLoading || groups.length === 0}
           aria-describedby={groupError ? "group-error" : undefined}
         >
-          <option value="" disabled>{groupsLoading ? "正在加载分组..." : groups.length === 0 ? "暂无可用分组" : "请选择分组"}</option>
+          <option value="" disabled>{groupsLoading ? "正在加载分组..." : groups.length === 0 ? "暂无可用 OpenAI 分组" : "请选择分组"}</option>
           {groups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.platform}）</option>)}
         </select>
         {groupError && <div className="group-feedback">
@@ -192,12 +197,18 @@ export default function App() {
         </div>
         <select id="api-key" value={selectedKeyId} onChange={(event) => setSelectedKeyId(event.target.value)} disabled={busy || !keysReady} aria-describedby={keyError ? "key-error" : groupKeys.length === 0 && keysReady ? "key-hint" : undefined}>
           {!keysReady && <option value="" disabled>{keyError ? "密钥加载失败" : "正在加载密钥..."}</option>}
-          {keysReady && groupKeys.length === 0 && <option value="create">创建专用密钥</option>}
+          {keysReady && groupKeys.length === 0 && <option value="create">创建“西牧ai”密钥</option>}
           {keysReady && groupKeys.map((key) => <option key={key.id} value={key.id}>{key.name || "未命名密钥"}（{key.preview}）</option>)}
         </select>
         {keyError && <div className="group-feedback"><p id="key-error" role="alert">{keyError}</p></div>}
-        {keysReady && groupKeys.length === 0 && <p id="key-hint" className="subtle key-hint">当前分组没有可用密钥，启用时将创建专用密钥。</p>}
+        {keysReady && groupKeys.length === 0 && <p id="key-hint" className="subtle key-hint">当前分组没有可用密钥，启用时将创建名为“西牧ai”的密钥。</p>}
       </div>}
+      <div className="group-field">
+        <label htmlFor="codex-model">模型</label>
+        <select id="codex-model" value={selectedModel} onChange={(event) => setSelectedModel(event.target.value)} disabled={busy}>
+          {MODELS.map((model) => <option key={model} value={model}>{model}</option>)}
+        </select>
+      </div>
       <button className="primary-button enable-button" onClick={enable} disabled={busy || groupsLoading || !keysReady || !selectedKeyId} type="button">{busy ? "正在处理..." : "启用 Codex"}</button>
       <p className="subtle configuration-note">启用会备份并替换当前 Codex 配置。</p>
       <button className="secondary-button restore-button" onClick={() => void restoreOriginalCodexConfig()} disabled={busy} type="button">恢复原 Codex 配置</button>

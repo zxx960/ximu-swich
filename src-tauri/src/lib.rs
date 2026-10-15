@@ -8,8 +8,8 @@ use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::{CryptPr
 
 const API_BASE: &str = "https://codex.ximuai.com/api/v1";
 const CODEX_BASE_URL: &str = "https://codex.ximuai.com";
-const CODEX_MODEL: &str = "gpt-5.5";
-const KEY_NAME: &str = "Codex Quick Connect";
+const CODEX_MODELS: &[&str] = &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"];
+const KEY_NAME: &str = "西牧ai";
 
 #[derive(Default)] struct AppState { session: Mutex<Option<Session>> }
 #[derive(Clone, Deserialize, Serialize)] struct Session { access_token: String }
@@ -196,7 +196,14 @@ fn backup_current_codex(prefix: &str, old_auth: &Option<Vec<u8>>, old_config: &O
     Ok(backup)
 }
 
-fn write_codex(key: &str) -> Result<String, String> {
+fn codex_config(model: &str) -> Result<String, String> {
+    if !CODEX_MODELS.contains(&model) { return Err(err("请选择有效的模型。")); }
+    let config = format!("model_provider = \"OpenAI\"\nmodel = \"{model}\"\nreview_model = \"{model}\"\nmodel_reasoning_effort = \"xhigh\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\nwindows_wsl_setup_acknowledged = true\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
+    toml::from_str::<toml::Table>(&config).map_err(|_| err("生成的 Codex 配置无效。"))?;
+    Ok(config)
+}
+
+fn write_codex(key: &str, config: &str) -> Result<String, String> {
     let (auth_path, config_path) = codex_paths()?;
     fs::create_dir_all(auth_path.parent().unwrap()).map_err(|_| err("无法创建 Codex 配置目录。"))?;
     let old_auth = snapshot(&auth_path)?; let old_config = snapshot(&config_path)?;
@@ -205,8 +212,6 @@ fn write_codex(key: &str) -> Result<String, String> {
     if let Some(bytes) = &old_auth { fs::write(backup.join("auth.json"), bytes).map_err(|_| err("无法保存 Codex 备份。"))?; }
     if let Some(bytes) = &old_config { fs::write(backup.join("config.toml"), bytes).map_err(|_| err("无法保存 Codex 备份。"))?; }
     let auth = serde_json::json!({ "OPENAI_API_KEY": key });
-    let config = format!("model_provider = \"OpenAI\"\nmodel = \"{CODEX_MODEL}\"\nreview_model = \"{CODEX_MODEL}\"\nmodel_reasoning_effort = \"xhigh\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\nwindows_wsl_setup_acknowledged = true\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
-    toml::from_str::<toml::Table>(&config).map_err(|_| err("生成的 Codex 配置无效。"))?;
     let result = write_file(&auth_path, serde_json::to_string_pretty(&auth).map_err(|_| err("无法生成认证配置。"))?.as_bytes()).and_then(|_| write_file(&config_path, config.as_bytes()));
     if let Err(error) = result { let _ = restore(&auth_path, &old_auth); let _ = restore(&config_path, &old_config); return Err(error); }
     Ok(backup.display().to_string())
@@ -283,7 +288,8 @@ async fn list_group_keys(state: State<'_, AppState>, group_id: i64) -> Result<Ve
 }
 
 #[tauri::command]
-async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<i64>) -> Result<EnableResult, String> {
+async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<i64>, model: String) -> Result<EnableResult, String> {
+    let config = codex_config(&model)?;
     if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
     let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
     let client = Client::new(); let account = get_account(&client, &session.access_token).await?;
@@ -309,7 +315,7 @@ async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<
     };
     let key = api_key.available();
     let record = ProvisionedKey { id: api_key.id, secret: api_key.key, group_id: Some(group_id) };
-    let backup_path = write_codex(&record.secret)?;
+    let backup_path = write_codex(&record.secret, &config)?;
     save_record(&record)?;
     Ok(EnableResult { balance: account.balance, key_created, backup_path, key })
 }
@@ -323,6 +329,23 @@ pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_hand
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_model_is_used_for_both_model_settings() {
+        for model in CODEX_MODELS {
+            let config: toml::Table = toml::from_str(&codex_config(model).unwrap()).unwrap();
+            assert_eq!(config["model"].as_str(), Some(*model));
+            assert_eq!(config["review_model"].as_str(), Some(*model));
+            assert_eq!(config["model_providers"]["OpenAI"]["wire_api"].as_str(), Some("responses"));
+        }
+    }
+
+    #[test]
+    fn unsupported_models_are_rejected() {
+        assert!(codex_config("").is_err());
+        assert!(codex_config("unknown-model").is_err());
+        assert!(codex_config("gpt-6.1-sol\"\nnetwork_access = \"disabled").is_err());
+    }
 
     #[test]
     #[ignore = "Requires a saved login and CODEX_QUICK_CONNECT_TEST_GROUP; performs read-only API requests"]
