@@ -295,7 +295,7 @@ async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<
 fn logout(state: State<'_, AppState>) -> Result<(), String> { clear_session()?; clear_saved_credentials()?; *state.session.lock().map_err(|_| err("应用会话不可用。"))? = None; Ok(()) }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, reset_chatgpt_login, restore_session, list_available_groups, list_group_keys, enable_codex, configure_claude, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
+pub fn run() { tauri::Builder::default().plugin(tauri_plugin_opener::init()).manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, reset_chatgpt_login, restore_session, list_available_groups, list_group_keys, enable_codex, configure_claude, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
 
 #[cfg(test)]
 mod tests {
