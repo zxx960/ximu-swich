@@ -6,6 +6,7 @@ use tauri::State;
 use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN}};
 
 mod client;
+mod claude;
 
 const API_BASE: &str = "https://codex.ximuai.com/api/v1";
 const CODEX_BASE_URL: &str = "https://codex.ximuai.com";
@@ -34,6 +35,7 @@ const KEY_NAME: &str = "西牧ai";
 #[derive(Deserialize, Serialize)] struct ProvisionedKey { id: i64, secret: String, #[serde(default)] group_id: Option<i64> }
 #[derive(Serialize)] struct EnableResult { balance: f64, key_created: bool, key: AvailableKey, launch_error: Option<String> }
 #[derive(Serialize)] struct ResetLoginResult { launch_error: Option<String> }
+#[derive(Serialize)] struct ConfigureClaudeResult { balance: f64, key_created: bool, key: AvailableKey }
 
 fn err(message: impl Into<String>) -> String { message.into() }
 
@@ -281,33 +283,58 @@ async fn list_group_keys(state: State<'_, AppState>, group_id: i64) -> Result<Ve
 }
 
 #[tauri::command]
+async fn configure_claude(state: State<'_, AppState>, group_id: i64, key_id: Option<i64>, model: String) -> Result<ConfigureClaudeResult, String> {
+    let model = model.trim().to_owned();
+    claude::validate_model(&model)?;
+    let settings_path = claude::settings_path()?;
+    let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
+    let client = Client::new();
+    let account = get_account(&client, &session.access_token).await?;
+    let (api_key, key_created) = resolve_group_key(&client, &session.access_token, group_id, key_id, "anthropic").await?;
+    let key = api_key.available();
+    tauri::async_runtime::spawn_blocking(move || claude::write_settings(&settings_path, &api_key.key, &model)).await
+        .map_err(|_| err("Claude Code 配置保存任务异常。"))??;
+    Ok(ConfigureClaudeResult { balance: account.balance, key_created, key })
+}
+
+async fn resolve_group_key(client: &Client, token: &str, group_id: i64, key_id: Option<i64>, platform: &str) -> Result<(ApiKey, bool), String> {
+    if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
+    let groups: Vec<AvailableGroup> = request_json(client.get(format!("{API_BASE}/groups/available")).bearer_auth(token)).await?;
+    if !groups.iter().any(|group| group.id == group_id && group.platform.trim().eq_ignore_ascii_case(platform)) {
+        return Err(err("所选分组不可用或不支持当前客户端，请重新加载分组。"));
+    }
+    if let Some(key_id) = key_id {
+        if key_id <= 0 { return Err(err("请选择有效的 API 密钥。")); }
+        let key: ApiKey = request_json(client.get(format!("{API_BASE}/keys/{key_id}")).bearer_auth(token)).await?;
+        if key.id != key_id || !key.usable_for_group(group_id) {
+            return Err(err("所选密钥不属于当前分组或已不可用，请重新加载密钥。"));
+        }
+        Ok((key, false))
+    } else {
+        // Recheck the group to avoid creating another dedicated key after a failed local write.
+        let existing = get_group_keys(client, token, group_id).await?
+            .into_iter().find(|key| key.name == KEY_NAME);
+        match existing {
+            Some(key) => Ok((key, false)),
+            None => {
+                let key: ApiKey = request_json(client.post(format!("{API_BASE}/keys")).bearer_auth(token).json(&CreateKeyRequest { name: KEY_NAME, group_id })).await?;
+                if !key.usable_for_group(group_id) { return Err(err("新建密钥不可用，请重新加载密钥后重试。")); }
+                Ok((key, true))
+            }
+        }
+    }
+}
+
+#[tauri::command]
 async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<i64>, model: String) -> Result<EnableResult, String> {
     let config = codex_config(&model)?;
     if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
     let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
     let app_id = tauri::async_runtime::spawn_blocking(client::find_client).await
         .map_err(|_| err("ChatGPT 客户端检测任务异常。"))??;
-    let client = Client::new(); let account = get_account(&client, &session.access_token).await?;
-    let (api_key, key_created) = if let Some(key_id) = key_id {
-        if key_id <= 0 { return Err(err("请选择有效的 API 密钥。")); }
-        let key: ApiKey = request_json(client.get(format!("{API_BASE}/keys/{key_id}")).bearer_auth(&session.access_token)).await?;
-        if key.id != key_id || !key.usable_for_group(group_id) {
-            return Err(err("所选密钥不属于当前分组或已不可用，请重新加载密钥。"));
-        }
-        (key, false)
-    } else {
-        // Recheck the group to avoid creating another dedicated key after a failed local write.
-        let existing = get_group_keys(&client, &session.access_token, group_id).await?
-            .into_iter().find(|key| key.name == KEY_NAME);
-        match existing {
-            Some(key) => (key, false),
-            None => {
-                let key: ApiKey = request_json(client.post(format!("{API_BASE}/keys")).bearer_auth(&session.access_token).json(&CreateKeyRequest { name: KEY_NAME, group_id })).await?;
-                if !key.usable_for_group(group_id) { return Err(err("新建密钥不可用，请重新加载密钥后重试。")); }
-                (key, true)
-            }
-        }
-    };
+    let client = Client::new();
+    let account = get_account(&client, &session.access_token).await?;
+    let (api_key, key_created) = resolve_group_key(&client, &session.access_token, group_id, key_id, "openai").await?;
     let key = api_key.available();
     let record = ProvisionedKey { id: api_key.id, secret: api_key.key, group_id: Some(group_id) };
     write_codex(&record.secret, &config)?;
@@ -326,16 +353,16 @@ async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<
 fn logout(state: State<'_, AppState>) -> Result<(), String> { clear_session()?; clear_saved_credentials()?; *state.session.lock().map_err(|_| err("应用会话不可用。"))? = None; Ok(()) }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, reset_chatgpt_login, restore_session, list_available_groups, list_group_keys, enable_codex, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
+pub fn run() { tauri::Builder::default().manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, reset_chatgpt_login, restore_session, list_available_groups, list_group_keys, enable_codex, configure_claude, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    struct ResetTestDir(PathBuf);
+    pub(super) struct ResetTestDir(pub(super) PathBuf);
 
     impl ResetTestDir {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let path = std::env::temp_dir().join(format!("quick-connect-reset-test-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
             fs::create_dir(&path).unwrap();
             Self(path)

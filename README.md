@@ -1,6 +1,6 @@
 # 西牧ai
 
-一个免安装的 Windows 桌面工具，用于登录 XimuAI 账户、选择密钥分组，并自动配置本机 Codex。基于 Tauri 2、React、TypeScript 和 Rust 开发。
+一个免安装的 Windows 桌面工具，用于登录 XimuAI 账户、选择密钥分组，并配置本机 ChatGPT / Codex 和 Claude Code CLI。基于 Tauri 2、React、TypeScript 和 Rust 开发。
 
 ## 系统要求
 
@@ -14,7 +14,7 @@
 
 1. 双击 `西牧ai.exe`。
 2. 输入 XimuAI 的邮箱和密码并登录；可按需勾选“保存账号和密码”。
-3. 确认显示的 API 账户余额；登录或恢复会话后，程序会自动加载可用密钥分组，下拉框仅显示平台为 OpenAI 的分组。
+3. 确认显示的 API 账户余额；在余额下方切换“ChatGPT”或“Claude Code”tab。ChatGPT 仅显示 OpenAI 分组，Claude Code 仅显示 Anthropic 分组。登录或切换 tab 后会自动加载对应分组。
 4. 在余额下方选择密钥分组，程序会自动拉取该分组的可用 API 密钥；确认或选择密钥后，在其下方选择模型（默认 `gpt-6.1-sol`），再点击“启动ChatGPT”。若该分组没有可用密钥，启动前会创建专用密钥。
 5. 程序会先检查客户端安装状态，再保存配置，随后关闭现有 ChatGPT 客户端及其子进程，等待退出后通过 Windows 应用启动服务重新打开，让新配置生效。客户端尚未运行时则直接启动。之后也可在终端运行 `codex`。
 
@@ -27,12 +27,26 @@
 - 登录成功后，会在本机加密保存登录会话。下次打开程序时会联网验证并尝试恢复登录；验证失败时需要重新登录。
 - 只有勾选“保存账号和密码”后，才会将邮箱和密码加密保存到本机，用于下次自动填充。取消勾选会删除已保存的账号密码，但不会清除登录会话。
 - 点击“退出”会清除本机登录会话和已保存的账号密码，不会撤销 API Key 或恢复 Codex 配置。
-- 分组、API 密钥选择和模型会按登录邮箱分别记住；重启或重新登录同一账号后，会自动回显。首次使用此功能需要先选择一次，回显本身不会自动启动客户端或写入 Codex 配置。
+- 分组、API 密钥选择和模型会按登录邮箱和客户端类型分别记住；切换 tab、重启或重新登录同一账号后，会自动回显。原有 ChatGPT 选择继续可用。首次使用此功能需要先选择一次，回显本身不会自动启动客户端或写入配置。
 - 回显时会重新拉取分组和密钥。原分组不可用时提示重新选择；原密钥不可用时提示确认其他可用密钥，没有可用密钥则恢复为启动时创建。网络请求失败时可以重试，不会使用缓存密钥启动。
 - 选择分组后，会分页拉取该分组的密钥，仅列出启用中、未过期且未耗尽总额度的密钥。界面显示名称和脱敏尾号，优先回显上次选择；没有已保存的可用选择时，优先选中名为 `西牧ai` 的密钥，否则选中第一个可用密钥；可在下拉框中切换。
 - 启用时会重新验证所选密钥的分组和可用状态，再使用该密钥配置 Codex，不会修改其他密钥的所属分组。
 - 当前分组没有可用密钥时，启用会先检查是否已有可用的 `西牧ai` 专用密钥，存在则复用，否则创建名为 `西牧ai` 的密钥。选择分组本身不会创建密钥或写入 Codex 配置。
 - 登录会话、可选保存的账号密码和 API Key 本地记录，均使用当前 Windows 用户的 DPAPI 加密。
+
+## Claude Code CLI 配置
+
+在“Claude Code”tab 选择 Anthropic 分组及其 API 密钥，再选择模型，点击“保存 Claude Code 配置”。模型下拉框依次提供 `claude-sonnet-5`、`claude-opus-5-5`、`claude-fable-5-1`，默认选择第一个 `claude-sonnet-5`；已保存的有效选择会继续回显，旧版模型别名或自定义选择会回退到默认模型。
+
+程序重新验证分组平台和密钥可用状态后，将配置合并写入 `%USERPROFILE%\.claude\settings.json`；设置了 `CLAUDE_CONFIG_DIR` 时使用该目录下的 `settings.json`，位置规则见 [Claude Code 配置说明](https://code.claude.com/docs/en/settings)。
+
+- 写入 `env.ANTHROPIC_BASE_URL = "https://codex.ximuai.com"`、`env.ANTHROPIC_AUTH_TOKEN`，以及 `model` 和 `env.ANTHROPIC_MODEL`。
+- 保留主题、权限、hooks、其他环境变量等现有设置；移除该文件 `env` 中冲突的 `ANTHROPIC_API_KEY`、`CLAUDE_CODE_OAUTH_TOKEN` 及 Bedrock / Vertex / Foundry 提供商开关。
+- 没有可用密钥时，保存前复用或创建同分组下名为“西牧ai”的密钥。界面只显示密钥名称和脱敏尾号。
+- 无效 JSON 或无效 `env` 结构会报错并保留原文件；保存时通过临时文件替换，不创建历史备份。
+- 保存成功后重新打开 Claude Code CLI，再运行 `claude`。本操作不关闭 CLI 进程、不启动 ChatGPT，也不修改 `.codex` 配置或 Claude 登录缓存。
+
+设置文件中的密钥为明文，请妥善保护。已有终端的环境变量、项目配置或组织托管设置可能覆盖用户配置；如果未生效，可用 Claude Code 的 `/status` 检查配置来源，优先级见[官方说明](https://code.claude.com/docs/en/settings#settings-precedence)。
 
 ## Codex 配置
 
@@ -110,12 +124,13 @@ Rust release 产物为 `src-tauri\target\release\西牧ai.exe`（未自定义 Ca
 
 ```text
 src/
-  App.tsx                 登录、账户、分组选择和配置恢复界面
+  App.tsx                 登录、账户、客户端 tab、分组选择和配置界面
   App.css                 界面样式
   main.tsx                React 入口
 src-tauri/
   src/lib.rs              API 请求、DPAPI 加密、密钥管理、配置写入和登录重置
   src/client.rs           Windows 客户端发现与启动
+  src/claude.rs           Claude Code CLI 用户配置合并和文件写入
   src/main.rs             桌面程序入口
   tauri.conf.json         窗口与构建配置
   capabilities/           Tauri 权限配置

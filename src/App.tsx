@@ -1,12 +1,13 @@
 import { FormEvent, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { DEFAULT_MODEL, MODELS, loadSelection, saveSelection, type Selection } from "./selection";
+import { DEFAULT_MODEL, MODELS, CLAUDE_DEFAULT_MODEL, CLAUDE_MODELS, loadSelection, saveSelection, type Selection, type ConnectionTarget } from "./selection";
 import "./App.css";
 
 type Account = { email: string; balance: number };
 type AvailableKey = { id: number; name: string; preview: string };
 type EnableResult = { balance: number; key_created: boolean; key: AvailableKey; launch_error: string | null };
 type ResetLoginResult = { launch_error: string | null };
+type ConfigureClaudeResult = { balance: number; key_created: boolean; key: AvailableKey };
 type KeyGroup = { id: number; name: string; platform: string };
 type SavedCredentials = { email: string; password: string };
 
@@ -18,6 +19,7 @@ export default function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [account, setAccount] = useState<Account | null>(null);
+  const [target, setTarget] = useState<ConnectionTarget>("chatgpt");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -40,13 +42,17 @@ export default function App() {
   const [restoringSession, setRestoringSession] = useState(true);
   const [rememberCredentials, setRememberCredentials] = useState(false);
   const accountEmail = account?.email;
+  const isClaude = target === "claude";
+  const platform = isClaude ? "anthropic" : "openai";
+  const platformLabel = isClaude ? "Claude" : "OpenAI";
+  const defaultModel = isClaude ? CLAUDE_DEFAULT_MODEL : DEFAULT_MODEL;
   const keysReady = !!selectedGroupId && loadedKeyGroupId === selectedGroupId && !keysLoading && !keyError;
 
   function rememberSelection(selection: Selection) {
     if (!accountEmail) return;
     savedSelection.current = selection;
     try {
-      saveSelection(window.localStorage, accountEmail, selection);
+      saveSelection(window.localStorage, accountEmail, selection, target);
       setSelectionError("");
     } catch {
       setSelectionError("本次选择可正常使用，但无法保存，下次打开时需要重新选择。");
@@ -83,25 +89,25 @@ export default function App() {
     setSelectionError("");
     savedSelection.current = null;
     try {
-      savedSelection.current = loadSelection(window.localStorage, accountEmail);
+      savedSelection.current = loadSelection(window.localStorage, accountEmail, target);
     } catch {
       setSelectionError("无法读取上次选择，请重新选择分组、密钥和模型。");
     }
-    setSelectedModel(savedSelection.current?.model ?? DEFAULT_MODEL);
+    setSelectedModel(savedSelection.current?.model ?? defaultModel);
     setGroupsLoading(true);
 
     async function loadGroups() {
       try {
         const availableGroups = await invoke<KeyGroup[]>("list_available_groups");
         if (!active) return;
-        const openAIGroups = availableGroups.filter((group) => group.platform.trim().toLowerCase() === "openai");
-        setGroups(openAIGroups);
-        if (openAIGroups.length === 0) {
-          setGroupError("当前账户没有可用的 OpenAI 密钥分组，请先在中转站后台配置分组权限。");
+        const matchingGroups = availableGroups.filter((group) => group.platform.trim().toLowerCase() === platform);
+        setGroups(matchingGroups);
+        if (matchingGroups.length === 0) {
+          setGroupError(`当前账户没有可用的 ${platformLabel} 密钥分组，请先在中转站后台配置分组权限。`);
         }
         const saved = savedSelection.current;
         if (saved?.groupId) {
-          if (openAIGroups.some((group) => String(group.id) === saved.groupId)) {
+          if (matchingGroups.some((group) => String(group.id) === saved.groupId)) {
             setSelectedGroupId(saved.groupId);
           } else {
             setGroupNotice("上次选择的分组已不可用，请重新选择分组。");
@@ -116,7 +122,7 @@ export default function App() {
 
     void loadGroups();
     return () => { active = false; };
-  }, [accountEmail, groupLoadAttempt]);
+  }, [accountEmail, groupLoadAttempt, target]);
 
   useEffect(() => {
     let active = true;
@@ -142,9 +148,9 @@ export default function App() {
         const keyId = preferred ? String(preferred.id) : "create";
         setSelectedKeyId(keyId);
         if (savedKeyId && savedKeyId !== "create" && !restoredKey) {
-          setKeyNotice(keys.length ? "上次选择的密钥已不可用，已选择其他可用密钥，请确认。" : "上次选择的密钥已不可用，启动时将创建“西牧ai”密钥。");
+          setKeyNotice(keys.length ? "上次选择的密钥已不可用，已选择其他可用密钥，请确认。" : `上次选择的密钥已不可用，${isClaude ? "保存配置" : "启动"}时将创建“西牧ai”密钥。`);
         }
-        rememberSelection({ groupId: selectedGroupId, keyId, model: saved?.model ?? DEFAULT_MODEL });
+        rememberSelection({ groupId: selectedGroupId, keyId, model: saved?.model ?? defaultModel });
       } catch (reason) {
         if (active) setKeyError(String(reason));
       } finally {
@@ -154,7 +160,17 @@ export default function App() {
 
     void loadKeys();
     return () => { active = false; };
-  }, [accountEmail, selectedGroupId, keyLoadAttempt]);
+  }, [accountEmail, selectedGroupId, keyLoadAttempt, target]);
+
+  function switchTarget(next: ConnectionTarget) {
+    if (busy || next === target) return;
+    setTarget(next);
+    setGroups([]); setSelectedGroupId(""); setGroupKeys([]); setSelectedKeyId(""); setLoadedKeyGroupId("");
+    setGroupsLoading(true); setKeysLoading(false); setGroupError(""); setKeyError("");
+    setGroupNotice(""); setKeyNotice(""); setSelectionError(""); setStatus(""); setError("");
+    setSelectedModel(next === "claude" ? CLAUDE_DEFAULT_MODEL : DEFAULT_MODEL);
+    savedSelection.current = null;
+  }
 
   async function signIn(event: FormEvent) {
     event.preventDefault();
@@ -183,15 +199,22 @@ export default function App() {
     if (keyId === null ? groupKeys.length !== 0 : !groupKeys.some((key) => key.id === keyId)) {
       setError("请选择当前分组的 API 密钥。"); return;
     }
-    setBusy(true); setError(""); setStatus("正在保存配置并重新启动 ChatGPT...");
+    const model = selectedModel.trim();
+    if (isClaude && !CLAUDE_MODELS.includes(model)) { setError("请选择有效的 Claude 模型。"); return; }
+    setBusy(true); setError(""); setStatus(isClaude ? "正在保存 Claude Code 配置..." : "正在保存配置并重新启动 ChatGPT...");
     try {
-      const result = await invoke<EnableResult>("enable_codex", { groupId, keyId, model: selectedModel });
+      const result = isClaude
+        ? await invoke<ConfigureClaudeResult>("configure_claude", { groupId, keyId, model })
+        : await invoke<EnableResult>("enable_codex", { groupId, keyId, model });
       setAccount((current) => current ? { ...current, balance: result.balance } : current);
       setGroupKeys((current) => [...current.filter((key) => key.id !== result.key.id), result.key]);
       setSelectedKeyId(String(result.key.id));
       setKeyNotice("");
-      rememberSelection({ groupId: selectedGroupId, keyId: String(result.key.id), model: selectedModel });
-      if (result.launch_error) {
+      setSelectedModel(model);
+      rememberSelection({ groupId: selectedGroupId, keyId: String(result.key.id), model });
+      if (isClaude) {
+        setStatus(result.key_created ? "Claude Code 配置已保存，已创建“西牧ai”密钥。请重新打开 CLI 后使用。" : "Claude Code 配置已保存，请重新打开 CLI 后使用。");
+      } else if ("launch_error" in result && result.launch_error) {
         setStatus("");
         setError(`配置已保存，但客户端未能按新配置启动：${result.launch_error}`);
       } else {
@@ -224,6 +247,17 @@ export default function App() {
       <div className="connection-chip">已连接</div>
       <h1 id="account-title">{account.email}</h1>
       <div className="balance-panel"><span>API 账户余额</span><strong>{formatBalance(account.balance)}</strong></div>
+      <div className="client-tabs" role="tablist" aria-label="客户端配置" onKeyDown={(event) => {
+        if (busy || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === "Home" ? "chatgpt" : event.key === "End" ? "claude" : target === "chatgpt" ? "claude" : "chatgpt";
+        switchTarget(next);
+        document.getElementById(`tab-${next}`)?.focus();
+      }}>
+        <button id="tab-chatgpt" role="tab" type="button" aria-selected={!isClaude} aria-controls="connection-panel" tabIndex={isClaude ? -1 : 0} disabled={busy} onClick={() => switchTarget("chatgpt")}>ChatGPT</button>
+        <button id="tab-claude" role="tab" type="button" aria-selected={isClaude} aria-controls="connection-panel" tabIndex={isClaude ? 0 : -1} disabled={busy} onClick={() => switchTarget("claude")}>Claude Code</button>
+      </div>
+      <div id="connection-panel" role="tabpanel" aria-labelledby={`tab-${target}`}>
       <div className="group-field" aria-busy={groupsLoading}>
         <label htmlFor="key-group">密钥分组</label>
         <select
@@ -233,7 +267,7 @@ export default function App() {
           disabled={busy || groupsLoading || groups.length === 0}
           aria-describedby={groupError ? "group-error" : undefined}
         >
-          <option value="" disabled>{groupsLoading ? "正在加载分组..." : groups.length === 0 ? "暂无可用 OpenAI 分组" : "请选择分组"}</option>
+          <option value="" disabled>{groupsLoading ? "正在加载分组..." : groups.length === 0 ? `暂无可用 ${platformLabel} 分组` : "请选择分组"}</option>
           {groups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.platform}）</option>)}
         </select>
         {groupNotice && <p className="subtle key-hint" role="status">{groupNotice}</p>}
@@ -254,18 +288,19 @@ export default function App() {
         </select>
         {keyError && <div className="group-feedback"><p id="key-error" role="alert">{keyError}</p></div>}
         {keyNotice && <p className="subtle key-hint" role="status">{keyNotice}</p>}
-        {keysReady && groupKeys.length === 0 && <p id="key-hint" className="subtle key-hint">当前分组没有可用密钥，启用时将创建名为“西牧ai”的密钥。</p>}
+        {keysReady && groupKeys.length === 0 && <p id="key-hint" className="subtle key-hint">当前分组没有可用密钥，{isClaude ? "保存配置" : "启动"}时将创建名为“西牧ai”的密钥。</p>}
       </div>}
       {selectedGroupId && <div className="group-field">
         <label htmlFor="codex-model">模型</label>
         <select id="codex-model" value={selectedModel} onChange={(event) => { const model = event.target.value; setSelectedModel(model); rememberSelection({ groupId: selectedGroupId, keyId: selectedKeyId || (savedSelection.current?.groupId === selectedGroupId ? savedSelection.current.keyId : ""), model }); }} disabled={busy}>
-          {MODELS.map((model) => <option key={model} value={model}>{model}</option>)}
+          {(isClaude ? CLAUDE_MODELS : MODELS).map((model) => <option key={model} value={model}>{model}</option>)}
         </select>
       </div>}
       {selectionError && <p className="subtle key-hint" role="alert">{selectionError}</p>}
-      <button className="primary-button enable-button" onClick={enable} disabled={busy || groupsLoading || !keysReady || !selectedKeyId} type="button">{busy ? "正在处理..." : "启动ChatGPT"}</button>
-      <p className="subtle configuration-note">保存配置后会重新启动 ChatGPT，正在进行的任务会中断。</p>
-      <button className="secondary-button restore-button" onClick={() => void resetChatGPTLogin()} disabled={busy} type="button">恢复原 ChatGPT 配置</button>
+      <button className="primary-button enable-button" onClick={enable} disabled={busy || groupsLoading || !keysReady || !selectedKeyId || !selectedModel.trim()} type="button">{busy ? "正在处理..." : isClaude ? "保存 Claude Code 配置" : "启动ChatGPT"}</button>
+      <p className="subtle configuration-note">{isClaude ? "保存到 Claude Code 用户配置，重新打开 CLI 后生效。" : "保存配置后会重新启动 ChatGPT，正在进行的任务会中断。"}</p>
+      {!isClaude && <button className="secondary-button restore-button" onClick={() => void resetChatGPTLogin()} disabled={busy} type="button">恢复原 ChatGPT 配置</button>}
+      </div>
     </section>}
     <footer aria-live="polite" className={error ? "message error" : "message"}>{error || status || "https://codex.ximuai.com"}</footer>
   </main>;
