@@ -48,26 +48,7 @@ pub fn write_settings(path: &Path, key: &str, model: &str) -> Result<(), String>
     let updated = merge_settings(old.as_deref(), key, model)?;
     fs::create_dir_all(path.parent().ok_or("无法定位 Claude Code 配置目录。")?)
         .map_err(|_| "无法创建 Claude Code 配置目录。")?;
-    let tmp = path.with_extension("ximuai.tmp");
-    fs::write(&tmp, &updated).map_err(|_| "无法写入 Claude Code 临时配置。")?;
-    // Replace the Windows file while preserving its permissions, without creating a backup.
-    let result = if old.is_some() {
-        use std::os::windows::ffi::OsStrExt;
-        let target: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
-        let replacement: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
-        unsafe {
-            windows_sys::Win32::Storage::FileSystem::ReplaceFileW(
-                target.as_ptr(), replacement.as_ptr(), std::ptr::null(), 0, std::ptr::null(), std::ptr::null(),
-            ) != 0
-        }
-    } else {
-        fs::rename(&tmp, path).is_ok()
-    };
-    if !result {
-        let _ = fs::remove_file(&tmp);
-        return Err("无法替换 Claude Code 配置，请检查文件访问权限后重试。".to_owned());
-    }
-    Ok(())
+    super::files::write(path, &updated, "ximuai.tmp")
 }
 
 #[cfg(test)]

@@ -27,6 +27,14 @@ toml = "0.8"
 chrono = { version = "0.4", features = ["clock"] }
 dirs = "5"
 thiserror = "2"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Foundation", "Win32_Storage_FileSystem"] }
 windows = { version = "0.61", features = ["Win32_System_Com", "Win32_UI_Shell"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSWorkspace", "NSRunningApplication", "libc"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSURL", "NSArray", "NSEnumerator"] }
 

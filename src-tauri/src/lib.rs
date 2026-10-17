@@ -1,12 +1,13 @@
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use std::{fs, path::{Path, PathBuf}, ptr::null_mut, sync::Mutex};
+use std::{fs, path::{Path, PathBuf}, sync::Mutex};
 use tauri::State;
-use windows_sys::Win32::{Foundation::LocalFree, Security::Cryptography::{CryptProtectData, CryptUnprotectData, CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN}};
 
 mod client;
 mod claude;
+mod storage;
+mod files;
 
 const API_BASE: &str = "https://codex.ximuai.com/api/v1";
 const CODEX_BASE_URL: &str = "https://codex.ximuai.com";
@@ -96,77 +97,17 @@ async fn get_group_keys(client: &Client, token: &str, group_id: i64) -> Result<V
     Ok(keys)
 }
 
-fn data_dir() -> Result<PathBuf, String> { Ok(dirs::data_local_dir().ok_or_else(|| err("无法定位 Windows 应用数据目录。"))?.join("Codex Quick Connect")) }
-fn record_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("provisioning.bin")) }
-fn session_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("session.bin")) }
-fn credentials_path() -> Result<PathBuf, String> { Ok(data_dir()?.join("credentials.bin")) }
-
-unsafe fn dpapi(input: &[u8], protect: bool) -> Result<Vec<u8>, String> {
-    let mut source = CRYPT_INTEGER_BLOB { cbData: input.len() as u32, pbData: input.as_ptr() as *mut u8 };
-    let mut target: CRYPT_INTEGER_BLOB = std::mem::zeroed();
-    let success = if protect { CryptProtectData(&mut source, null_mut(), null_mut(), null_mut(), null_mut(), CRYPTPROTECT_UI_FORBIDDEN, &mut target) } else { CryptUnprotectData(&mut source, null_mut(), null_mut(), null_mut(), null_mut(), CRYPTPROTECT_UI_FORBIDDEN, &mut target) };
-    if success == 0 { return Err(err("Windows 凭据保护服务不可用。")); }
-    let output = std::slice::from_raw_parts(target.pbData, target.cbData as usize).to_vec();
-    LocalFree(target.pbData.cast());
-    Ok(output)
-}
-
-fn save_record(record: &ProvisionedKey) -> Result<(), String> {
-    let path = record_path()?;
-    fs::create_dir_all(path.parent().unwrap()).map_err(|_| err("无法创建应用数据目录。"))?;
-    let encoded = serde_json::to_vec(record).map_err(|_| err("无法保存密钥记录。"))?;
-    let encrypted = unsafe { dpapi(&encoded, true)? };
-    fs::write(path, encrypted).map_err(|_| err("无法保存加密密钥记录。"))
-}
-
-fn load_session() -> Result<Option<Session>, String> {
-    let path = session_path()?;
-    if !path.exists() { return Ok(None); }
-    let encrypted = fs::read(path).map_err(|_| err("无法读取本机登录会话。"))?;
-    let plain = unsafe { dpapi(&encrypted, false)? };
-    serde_json::from_slice(&plain).map(Some).map_err(|_| err("本机登录会话已损坏。"))
-}
-
-fn save_session(session: &Session) -> Result<(), String> {
-    let path = session_path()?;
-    fs::create_dir_all(path.parent().unwrap()).map_err(|_| err("无法创建应用数据目录。"))?;
-    let encoded = serde_json::to_vec(session).map_err(|_| err("无法保存登录会话。"))?;
-    let encrypted = unsafe { dpapi(&encoded, true)? };
-    fs::write(path, encrypted).map_err(|_| err("无法保存登录会话。"))
-}
-
-fn clear_session() -> Result<(), String> {
-    let path = session_path()?;
-    if path.exists() { fs::remove_file(path).map_err(|_| err("无法清除登录会话。"))?; }
-    Ok(())
-}
-
-fn load_saved_credentials() -> Result<Option<SavedCredentials>, String> {
-    let path = credentials_path()?;
-    if !path.exists() { return Ok(None); }
-    let encrypted = fs::read(path).map_err(|_| err("无法读取保存的登录信息。"))?;
-    let plain = unsafe { dpapi(&encrypted, false)? };
-    serde_json::from_slice(&plain).map(Some).map_err(|_| err("保存的登录信息已损坏。"))
-}
-
-fn save_credentials(credentials: &SavedCredentials) -> Result<(), String> {
-    let path = credentials_path()?;
-    fs::create_dir_all(path.parent().unwrap()).map_err(|_| err("无法创建应用数据目录。"))?;
-    let encoded = serde_json::to_vec(credentials).map_err(|_| err("无法保存登录信息。"))?;
-    let encrypted = unsafe { dpapi(&encoded, true)? };
-    fs::write(path, encrypted).map_err(|_| err("无法保存登录信息。"))
-}
-
-fn clear_saved_credentials() -> Result<(), String> {
-    let path = credentials_path()?;
-    if path.exists() { fs::remove_file(path).map_err(|_| err("无法清除保存的登录信息。"))?; }
-    Ok(())
-}
-
+fn save_record(record: &ProvisionedKey) -> Result<(), String> { storage::save("provisioning", record) }
+fn load_session() -> Result<Option<Session>, String> { storage::load("session") }
+fn save_session(session: &Session) -> Result<(), String> { storage::save("session", session) }
+fn clear_session() -> Result<(), String> { storage::delete("session") }
+fn load_saved_credentials() -> Result<Option<SavedCredentials>, String> { storage::load("credentials") }
+fn save_credentials(credentials: &SavedCredentials) -> Result<(), String> { storage::save("credentials", credentials) }
+fn clear_saved_credentials() -> Result<(), String> { storage::delete("credentials") }
 fn codex_paths() -> Result<(PathBuf, PathBuf), String> { let dir = dirs::home_dir().ok_or_else(|| err("无法定位用户主目录。"))?.join(".codex"); Ok((dir.join("auth.json"), dir.join("config.toml"))) }
 fn snapshot(path: &Path) -> Result<Option<Vec<u8>>, String> { if path.exists() { fs::read(path).map(Some).map_err(|_| err("无法读取现有 Codex 配置。")) } else { Ok(None) } }
-fn restore(path: &Path, old: &Option<Vec<u8>>) -> Result<(), String> { match old { Some(bytes) => fs::write(path, bytes).map_err(|_| err("无法恢复原 Codex 配置。")), None => { if path.exists() { fs::remove_file(path).map_err(|_| err("无法清理未完成的 Codex 配置。"))?; } Ok(()) } } }
-fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> { let tmp = path.with_extension("quick-connect.tmp"); fs::write(&tmp, bytes).map_err(|_| err("无法写入 Codex 临时配置。"))?; if path.exists() { fs::remove_file(path).map_err(|_| err("无法替换当前 Codex 配置。"))?; } fs::rename(tmp, path).map_err(|_| err("无法完成 Codex 配置写入。")) }
+fn restore(path: &Path, old: &Option<Vec<u8>>) -> Result<(), String> { match old { Some(bytes) => files::write(path, bytes, "quick-connect.restore.tmp"), None => { if path.exists() { fs::remove_file(path).map_err(|_| err("无法清理未完成的 Codex 配置。"))?; } Ok(()) } } }
+fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> { files::write(path, bytes, "quick-connect.tmp") }
 
 fn reset_login_files(
     auth_path: &Path,
@@ -194,7 +135,8 @@ fn reset_login_files(
 
 fn codex_config(model: &str) -> Result<String, String> {
     if !CODEX_MODELS.contains(&model) { return Err(err("请选择有效的模型。")); }
-    let config = format!("model_provider = \"OpenAI\"\nmodel = \"{model}\"\nreview_model = \"{model}\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\nwindows_wsl_setup_acknowledged = true\n\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
+    let platform_config = if cfg!(windows) { "windows_wsl_setup_acknowledged = true\n" } else { "cli_auth_credentials_store = \"file\"\n" };
+    let config = format!("model_provider = \"OpenAI\"\nmodel = \"{model}\"\nreview_model = \"{model}\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\n{platform_config}\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
     toml::from_str::<toml::Table>(&config).map_err(|_| err("生成的 Codex 配置无效。"))?;
     Ok(config)
 }
@@ -255,7 +197,7 @@ async fn restore_session(state: State<'_, AppState>) -> Result<Option<Account>, 
     let session = match load_session() {
         Ok(Some(session)) => session,
         Ok(None) => return Ok(None),
-        Err(_) => { let _ = clear_session(); return Ok(None); }
+        Err(error) => return Err(error),
     };
     let client = Client::new();
     match get_account(&client, &session.access_token).await {
@@ -470,6 +412,9 @@ mod tests {
             assert_eq!(config["review_model"].as_str(), Some(*model));
             assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
             assert_eq!(config["model_providers"]["OpenAI"]["wire_api"].as_str(), Some("responses"));
+            assert_eq!(config.contains_key("windows_wsl_setup_acknowledged"), cfg!(windows));
+            #[cfg(target_os = "macos")]
+            assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"));
         }
     }
 
