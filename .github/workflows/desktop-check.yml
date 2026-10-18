@@ -51,7 +51,7 @@ jobs:
       - name: Verify both Mac architectures and archive app
         if: runner.os == 'macOS'
         run: |
-          lipo -verify_arch arm64 x86_64 src-tauri/target/universal-apple-darwin/release/bundle/macos/西牧ai.app/Contents/MacOS/西牧ai
+          lipo src-tauri/target/universal-apple-darwin/release/bundle/macos/西牧ai.app/Contents/MacOS/西牧ai -verify_arch arm64 x86_64
           tar -czf ximuai-macos-universal.app.tar.gz -C src-tauri/target/universal-apple-darwin/release/bundle/macos 西牧ai.app
       - name: Upload macOS application and DMG
         if: runner.os == 'macOS'
