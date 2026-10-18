@@ -42,6 +42,16 @@ with (output / 'stdout.log').open('w') as stdout, (output / 'stderr.log').open('
             process.wait(timeout=10)
     else:
         time.sleep(8)
+if not alive:
+    command = ['/usr/bin/lldb', '--batch', '-o', 'run', '-k', 'thread backtrace all', '-k', 'image list', '--', str(binary)]
+    with (output / 'lldb.log').open('w') as debugger_log:
+        try:
+            debugger = subprocess.run(command, stdout=debugger_log, stderr=subprocess.STDOUT, timeout=45, env=dict(os.environ, RUST_BACKTRACE='full'))
+            metadata['lldb_exit_code'] = debugger.returncode
+        except subprocess.TimeoutExpired:
+            metadata['lldb_timeout'] = True
+    print('DEBUGGER:')
+    print((output / 'lldb.log').read_text()[-24000:])
 reports = Path.home() / 'Library/Logs/DiagnosticReports'
 if reports.exists():
     for report in reports.glob('*'):
