@@ -1,19 +1,20 @@
-name: Desktop checks
+name: Package Windows and macOS
 
 on:
   push:
-  pull_request:
+    branches: [build/windows-macos-20261018]
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  check:
+  package:
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-15, macos-15-intel]
+        os: [windows-latest, macos-15]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -33,6 +34,33 @@ jobs:
       - name: Build Windows desktop binary
         if: runner.os == 'Windows'
         run: pnpm tauri build --no-bundle
-      - name: Build macOS application
+      - name: Upload Windows application
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ximuai-windows-x64
+          path: src-tauri/target/release/西牧ai.exe
+          if-no-files-found: error
+          retention-days: 14
+      - name: Install both macOS Rust targets
         if: runner.os == 'macOS'
-        run: pnpm tauri build --bundles app
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - name: Build universal macOS application and DMG
+        if: runner.os == 'macOS'
+        run: pnpm tauri build --target universal-apple-darwin
+      - name: Verify both Mac architectures and archive app
+        if: runner.os == 'macOS'
+        run: |
+          lipo -verify_arch arm64 x86_64 src-tauri/target/universal-apple-darwin/release/bundle/macos/西牧ai.app/Contents/MacOS/西牧ai
+          tar -czf ximuai-macos-universal.app.tar.gz -C src-tauri/target/universal-apple-darwin/release/bundle/macos 西牧ai.app
+      - name: Upload macOS application and DMG
+        if: runner.os == 'macOS'
+        uses: actions/upload-artifact@v7
+        with:
+          name: ximuai-macos-universal
+          path: |
+            src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+            ximuai-macos-universal.app.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
