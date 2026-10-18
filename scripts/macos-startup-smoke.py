@@ -9,16 +9,30 @@ import sys
 import time
 
 archive = Path(sys.argv[1]).resolve()
-output = Path('startup-diagnostics').resolve()
-output.mkdir(exist_ok=True)
-staging = Path(os.environ['RUNNER_TEMP']) / 'ximuai-startup-test'
-staging.mkdir(exist_ok=True)
+variant = sys.argv[2] if len(sys.argv) > 2 else 'original'
+output = (Path('startup-diagnostics') / variant).resolve()
+output.mkdir(parents=True, exist_ok=True)
+staging = Path(os.environ['RUNNER_TEMP']) / 'ximuai-startup-test' / variant
+staging.mkdir(parents=True, exist_ok=True)
 subprocess.run(['tar', '-xzf', str(archive), '-C', str(staging)], check=True)
 app = next(staging.glob('*.app'))
 with (app / 'Contents/Info.plist').open('rb') as file:
     info = plistlib.load(file)
+if variant in ('ascii-executable', 'ascii-bundle'):
+    old_binary = app / 'Contents/MacOS' / info['CFBundleExecutable']
+    new_binary = old_binary.with_name('ximuai')
+    old_binary.rename(new_binary)
+    info['CFBundleExecutable'] = 'ximuai'
+    with (app / 'Contents/Info.plist').open('wb') as file:
+        plistlib.dump(info, file)
+if variant == 'ascii-bundle':
+    renamed_app = app.with_name('XimuAI.app')
+    app.rename(renamed_app)
+    app = renamed_app
+if variant != 'original':
+    subprocess.run(['codesign', '--force', '--deep', '--sign', '-', str(app)], check=True)
 binary = app / 'Contents/MacOS' / info['CFBundleExecutable']
-metadata = {'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(), 'bundle_id': info['CFBundleIdentifier']}
+metadata = {'variant': variant, 'archive_sha256': hashlib.sha256(archive.read_bytes()).hexdigest(), 'bundle_id': info['CFBundleIdentifier']}
 for name, command in [('system', ['sw_vers']), ('architecture', ['uname', '-m']), ('signature', ['codesign', '-dv', '--verbose=4', str(app)])]:
     result = subprocess.run(command, capture_output=True, text=True)
     (output / (name + '.txt')).write_text(result.stdout + result.stderr)

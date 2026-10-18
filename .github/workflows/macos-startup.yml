@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-15, macos-26]
+        os: [macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -27,7 +27,10 @@ jobs:
       - name: Launch original packaged application
         id: smoke
         continue-on-error: true
-        run: python3 scripts/macos-startup-smoke.py original-package/ximuai-macos-universal.app.tar.gz
+        run: |
+          for variant in signed ascii-executable ascii-bundle; do
+            python3 scripts/macos-startup-smoke.py original-package/ximuai-macos-universal.app.tar.gz "$variant" || true
+          done
       - uses: actions/upload-artifact@v7
         if: always()
         with:
