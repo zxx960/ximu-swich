@@ -1,6 +1,11 @@
-name: Diagnose macOS startup
+name: Verify packaged macOS startup
 on:
   workflow_dispatch:
+    inputs:
+      run_id:
+        description: Packaging workflow run containing the app archive
+        required: true
+        type: string
 permissions:
   contents: read
   actions: read
@@ -10,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-26]
+        os: [macos-15, macos-15-intel, macos-26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -20,15 +25,12 @@ jobs:
         with:
           name: ximuai-macos-universal
           path: original-package
-          run-id: 39092187830
+          run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
-      - name: Launch original packaged application
+      - name: Launch actual packaged application
         id: smoke
         continue-on-error: true
-        run: |
-          for variant in signed ascii-executable ascii-bundle; do
-            python3 scripts/macos-startup-smoke.py original-package/ximuai-macos-universal.app.tar.gz "$variant" || true
-          done
+        run: python3 scripts/macos-startup-smoke.py original-package/ximuai-macos-universal.app.tar.gz
       - uses: actions/upload-artifact@v7
         if: always()
         with:
