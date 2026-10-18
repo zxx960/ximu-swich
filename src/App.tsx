@@ -280,7 +280,7 @@ export default function App() {
           aria-describedby={groupError ? "group-error" : undefined}
         >
           <option value="" disabled>{groupsLoading ? "正在加载分组..." : groups.length === 0 ? `暂无可用 ${platformLabel} 分组` : "请选择分组"}</option>
-          {groups.map((group) => <option key={group.id} value={group.id}>{group.name}（{group.platform}）</option>)}
+          {groups.map((group) => <option key={group.id} value={group.id}>{group.name}</option>)}
         </select>
         {groupNotice && <p className="subtle key-hint" role="status">{groupNotice}</p>}
         {groupError && <div className="group-feedback">
