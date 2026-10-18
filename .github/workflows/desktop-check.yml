@@ -1,8 +1,6 @@
 name: Package Windows and macOS
 
 on:
-  push:
-    branches: [build/windows-macos-20261018]
   workflow_dispatch:
 
 permissions:

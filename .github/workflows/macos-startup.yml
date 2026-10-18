@@ -1,0 +1,40 @@
+name: Diagnose macOS startup
+on:
+  push:
+    branches: [build/windows-macos-20261018]
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+jobs:
+  smoke:
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-26]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ximuai-macos-universal
+          path: original-package
+          run-id: 39092187830
+          github-token: ${{ github.token }}
+      - name: Launch original packaged application
+        id: smoke
+        continue-on-error: true
+        run: python3 scripts/macos-startup-smoke.py original-package/ximuai-macos-universal.app.tar.gz
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ximuai-startup-${{ matrix.os }}
+          path: startup-diagnostics
+          if-no-files-found: error
+          retention-days: 7
+      - name: Check startup result
+        if: steps.smoke.outcome == 'failure'
+        run: exit 1
