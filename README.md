@@ -119,6 +119,8 @@ pnpm tauri build
 
 Windows release 产物为 `src-tauri\target\release\西牧ai.exe`（未自定义 Cargo 输出目录时），默认不生成安装包。macOS 自动合并 `src-tauri/tauri.macos.conf.json`，默认生成 `.app` 和 `.dmg`，产物位于 `src-tauri/target/release/bundle/`。
 
+macOS 应用显示名称仍为“西牧ai”，包内可执行文件使用 ASCII 名称 `ximuai`，避免中文可执行文件名触发 WebKit 初始化时的 `NSBundle` 查询崩溃。构建后可运行 `python3 scripts/check-macos-startup.py src-tauri/target/release/bundle/macos/西牧ai.app`，检查真实应用能否启动并持续运行 30 秒。CI 在 macOS 15（Apple Silicon / Intel）和 macOS 26 上执行这一检查；它会关闭自己启动的测试进程。
+
 Mac 上的开发与打包命令相同：
 
 ```sh
