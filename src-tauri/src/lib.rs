@@ -136,7 +136,7 @@ fn reset_login_files(
 fn codex_config(model: &str) -> Result<String, String> {
     if !CODEX_MODELS.contains(&model) { return Err(err("请选择有效的模型。")); }
     let platform_config = if cfg!(windows) { "windows_wsl_setup_acknowledged = true\n" } else { "cli_auth_credentials_store = \"file\"\n" };
-    let config = format!("model_provider = \"OpenAI\"\nmodel = \"{model}\"\nreview_model = \"{model}\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\n{platform_config}\n[model_providers.OpenAI]\nname = \"OpenAI\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
+    let config = format!("model_provider = \"custom\"\nmodel = \"{model}\"\nreview_model = \"{model}\"\nmodel_reasoning_effort = \"high\"\ndisable_response_storage = true\nnetwork_access = \"enabled\"\n{platform_config}\n[model_providers.custom]\nname = \"custom\"\nbase_url = \"{CODEX_BASE_URL}\"\nwire_api = \"responses\"\nrequires_openai_auth = true\n\n[features]\ngoals = true\n");
     toml::from_str::<toml::Table>(&config).map_err(|_| err("生成的 Codex 配置无效。"))?;
     Ok(config)
 }
@@ -411,7 +411,9 @@ mod tests {
             assert_eq!(config["model"].as_str(), Some(*model));
             assert_eq!(config["review_model"].as_str(), Some(*model));
             assert_eq!(config["model_reasoning_effort"].as_str(), Some("high"));
-            assert_eq!(config["model_providers"]["OpenAI"]["wire_api"].as_str(), Some("responses"));
+            let provider = config["model_provider"].as_str().unwrap();
+            assert_eq!(provider, "custom");
+            assert_eq!(config["model_providers"][provider]["wire_api"].as_str(), Some("responses"));
             assert_eq!(config.contains_key("windows_wsl_setup_acknowledged"), cfg!(windows));
             #[cfg(target_os = "macos")]
             assert_eq!(config["cli_auth_credentials_store"].as_str(), Some("file"));
