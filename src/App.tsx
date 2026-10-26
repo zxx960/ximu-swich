@@ -20,6 +20,8 @@ export default function App() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [account, setAccount] = useState<Account | null>(null);
+  const [balanceRefreshing, setBalanceRefreshing] = useState(false);
+  const [balanceError, setBalanceError] = useState("");
   const [target, setTarget] = useState<ConnectionTarget>("chatgpt");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -179,7 +181,7 @@ export default function App() {
     setBusy(true); setError(""); setStatus("正在登录...");
     try {
       const result = await invoke<Account>("login", { email: email.trim(), password, rememberCredentials });
-      setAccount(result); setPassword(""); setStatus("已连接到账户。");
+      setAccount(result); setBalanceError(""); setPassword(""); setStatus("已连接到账户。");
     } catch (reason) { setPassword(""); setStatus(""); setError(String(reason)); }
     finally { setBusy(false); }
   }
@@ -247,17 +249,40 @@ export default function App() {
     catch { setStatus(""); setError("无法打开默认浏览器，请手动访问 https://codex.ximuai.com/purchase 充值。"); }
   }
 
+  async function refreshBalance() {
+    if (!account || busy || balanceRefreshing) return;
+    const email = account.email;
+    setBalanceRefreshing(true);
+    setBalanceError("");
+    try {
+      const balance = await invoke<number>("refresh_balance");
+      setAccount((current) => current?.email === email ? { ...current, balance } : current);
+    } catch (reason) {
+      setBalanceError(`余额刷新失败：${String(reason)}`);
+    } finally {
+      setBalanceRefreshing(false);
+    }
+  }
+
   return <main className="app-shell">
-    <header className="topbar"><div className="brand"><img className="brand-mark" src="/logo.jpg" alt="" /><span>西牧ai</span></div>{account && <button className="quiet-button" type="button" onClick={signOut} aria-label="退出登录">退出</button>}</header>
+    <header className="topbar"><div className="brand"><img className="brand-mark" src="/logo.jpg" alt="" /><span>西牧ai</span></div>{account && <button className="quiet-button" type="button" onClick={signOut} disabled={balanceRefreshing} aria-label="退出登录">退出</button>}</header>
     {restoringSession ? <section className="content login-view"><div className="eyebrow">XIMUAI CODEX</div><h1>正在恢复登录...</h1><p className="subtle">正在验证本机加密会话。</p></section> : !account ? <section className="content login-view" aria-labelledby="login-title"><div className="eyebrow">XIMUAI CODEX</div><h1 id="login-title">连接你的 Codex</h1><p className="subtle">登录后选择密钥分组，一键配置本机 Codex。</p><form onSubmit={signIn} className="form-stack"><label>邮箱<input type="email" autoComplete="username" value={email} onChange={(e) => setEmail(e.target.value)} disabled={busy} /></label><label>密码<input type="password" autoComplete="current-password" value={password} onChange={(e) => setPassword(e.target.value)} disabled={busy} /></label><label className="remember-option"><input type="checkbox" checked={rememberCredentials} onChange={(event) => void toggleRememberCredentials(event.target.checked)} disabled={busy} />保存账号和密码</label><button className="primary-button" disabled={busy} type="submit">{busy ? "正在连接..." : "登录"}</button></form></section> : <section className="content connected-view" aria-labelledby="account-title">
       <div className="connection-chip">已连接</div>
       <h1 id="account-title">{account.email}</h1>
       <div className="balance-panel">
         <span>API 账户余额</span>
-        <div className="balance-amount">
+        <div className="balance-amount" aria-busy={balanceRefreshing}>
           <strong>{formatBalance(account.balance)}</strong>
+          <button className="refresh-balance-button" type="button" onClick={() => void refreshBalance()} disabled={busy || balanceRefreshing} aria-label={balanceRefreshing ? "正在刷新余额" : "刷新余额"} title={balanceRefreshing ? "正在刷新余额" : "刷新余额"}>
+            <svg className={balanceRefreshing ? "is-refreshing" : undefined} width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+              <path d="M20 7v5h-5" />
+              <path d="M4 17v-5h5" />
+              <path d="M6.1 6.1a8 8 0 0 1 13.2 3.1L20 12M4 12l.7 2.8a8 8 0 0 0 13.2 3.1" />
+            </svg>
+          </button>
           <button className="recharge-button" type="button" onClick={() => void openPurchase()}>充值</button>
         </div>
+        {balanceError && <p className="balance-error" role="alert">{balanceError}</p>}
       </div>
       <div className="client-tabs" role="tablist" aria-label="客户端配置" onKeyDown={(event) => {
         if (busy || !["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
