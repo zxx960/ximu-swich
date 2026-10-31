@@ -176,4 +176,4 @@ mod platform {
 }
 
 #[cfg(not(any(windows, target_os = "macos")))]
-compile_error!("西牧ai currently supports Windows and macOS only.");
+compile_error!("西牧swich currently supports Windows and macOS only.");

@@ -1,4 +1,4 @@
-# 西牧ai
+# 西牧swich
 
 一个支持 Windows 和 macOS 的桌面工具，用于登录 XimuAI 账户、选择密钥分组，并配置本机 ChatGPT / Codex 和 Claude Code CLI。基于 Tauri 2、React、TypeScript 和 Rust 开发。
 
@@ -14,7 +14,7 @@
 
 ## 使用
 
-1. Windows 双击 `西牧ai.exe`；macOS 打开 `西牧ai.app`。
+1. Windows 双击 `西牧swich.exe`；macOS 打开 `西牧swich.app`。
 2. 输入 XimuAI 的邮箱和密码并登录；可按需勾选“保存账号和密码”。
 3. 确认显示的 API 账户余额；在余额下方切换“ChatGPT”或“Claude Code”tab。ChatGPT 仅显示 OpenAI 分组，Claude Code 仅显示 Anthropic 分组。登录或切换 tab 后会自动加载对应分组。
 4. 在余额下方选择密钥分组，程序会自动拉取该分组的可用 API 密钥；确认或选择密钥后，在其下方选择模型（默认 `gpt-6.1-sol`），再点击“启动ChatGPT”。若该分组没有可用密钥，启动前会创建专用密钥。
@@ -119,9 +119,9 @@ pnpm tauri dev
 pnpm tauri build
 ```
 
-Windows release 产物为 `src-tauri\target\release\西牧ai.exe`（未自定义 Cargo 输出目录时），默认不生成安装包。macOS 自动合并 `src-tauri/tauri.macos.conf.json`，默认生成 `.app` 和 `.dmg`，产物位于 `src-tauri/target/release/bundle/`。
+Windows release 产物为 `src-tauri\target\release\西牧swich.exe`（未自定义 Cargo 输出目录时），默认不生成安装包。macOS 自动合并 `src-tauri/tauri.macos.conf.json`，默认生成 `.app` 和 `.dmg`，产物位于 `src-tauri/target/release/bundle/`。
 
-macOS 应用显示名称仍为“西牧ai”，包内可执行文件使用 ASCII 名称 `ximuai`，避免中文可执行文件名触发 WebKit 初始化时的 `NSBundle` 查询崩溃。构建后可运行 `python3 scripts/check-macos-startup.py src-tauri/target/release/bundle/macos/西牧ai.app`，检查真实应用能否启动并持续运行 30 秒。CI 在 macOS 15（Apple Silicon / Intel）和 macOS 26 上执行这一检查；它会关闭自己启动的测试进程。
+macOS 应用显示名称为“西牧swich”，包内可执行文件使用 ASCII 名称 `ximuai`，避免中文可执行文件名触发 WebKit 初始化时的 `NSBundle` 查询崩溃。构建后可运行 `python3 scripts/check-macos-startup.py src-tauri/target/release/bundle/macos/西牧swich.app`，检查真实应用能否启动并持续运行 30 秒。CI 在 macOS 15（Apple Silicon / Intel）和 macOS 26 上执行这一检查；它会关闭自己启动的测试进程。
 
 Mac 上的开发与打包命令相同：
 

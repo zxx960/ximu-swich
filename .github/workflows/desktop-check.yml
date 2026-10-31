@@ -39,7 +39,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: ximuai-windows-x64
-          path: src-tauri/target/release/西牧ai.exe
+          path: src-tauri/target/release/西牧swich.exe
           if-no-files-found: error
           retention-days: 14
       - name: Install both macOS Rust targets
@@ -50,18 +50,18 @@ jobs:
         run: pnpm tauri build --target universal-apple-darwin
       - name: Check universal macOS startup
         if: matrix.os == 'macos-15'
-        run: python3 scripts/check-macos-startup.py src-tauri/target/universal-apple-darwin/release/bundle/macos/西牧ai.app
+        run: python3 scripts/check-macos-startup.py src-tauri/target/universal-apple-darwin/release/bundle/macos/西牧swich.app
       - name: Build native macOS application
         if: runner.os == 'macOS' && matrix.os != 'macos-15'
         run: pnpm tauri build --bundles app
       - name: Check native macOS startup
         if: runner.os == 'macOS' && matrix.os != 'macos-15'
-        run: python3 scripts/check-macos-startup.py src-tauri/target/release/bundle/macos/西牧ai.app
+        run: python3 scripts/check-macos-startup.py src-tauri/target/release/bundle/macos/西牧swich.app
       - name: Verify both Mac architectures and archive app
         if: matrix.os == 'macos-15'
         run: |
-          lipo src-tauri/target/universal-apple-darwin/release/bundle/macos/西牧ai.app/Contents/MacOS/ximuai -verify_arch arm64 x86_64
-          tar -czf ximuai-macos-universal.app.tar.gz -C src-tauri/target/universal-apple-darwin/release/bundle/macos 西牧ai.app
+          lipo src-tauri/target/universal-apple-darwin/release/bundle/macos/西牧swich.app/Contents/MacOS/ximuai -verify_arch arm64 x86_64
+          tar -czf ximuai-macos-universal.app.tar.gz -C src-tauri/target/universal-apple-darwin/release/bundle/macos 西牧swich.app
       - name: Upload macOS application and DMG
         if: matrix.os == 'macos-15'
         uses: actions/upload-artifact@v7
