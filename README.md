@@ -2,6 +2,8 @@
 
 一个支持 Windows 和 macOS 的桌面工具，用于登录 XimuAI 账户、选择密钥分组，并配置本机 ChatGPT / Codex 和 Claude Code CLI。基于 Tauri 2、React、TypeScript 和 Rust 开发。
 
+开发对接参见[客户端与服务器接口文档](docs/服务器接口文档.md)，包含接口地址、认证方式、参数和响应。
+
 ## 系统要求
 
 - Windows 10 / 11，或 macOS 12 及以上；目标客户端还需满足其自身的系统与处理器要求。
