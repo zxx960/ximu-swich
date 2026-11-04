@@ -1,8 +1,9 @@
-use reqwest::Client;
+use reqwest::{Client, RequestBuilder, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::Value;
-use std::{fs, path::{Path, PathBuf}, sync::Mutex};
+use std::{fs, path::{Path, PathBuf}};
 use tauri::State;
+use tokio::sync::Mutex;
 
 mod client;
 mod claude;
@@ -15,10 +16,16 @@ const CODEX_MODELS: &[&str] = &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-
 const KEY_NAME: &str = "西牧ai";
 
 #[derive(Default)] struct AppState { session: Mutex<Option<Session>> }
-#[derive(Clone, Deserialize, Serialize)] struct Session { access_token: String }
+#[derive(Deserialize, Serialize)]
+struct Session {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: Option<String>,
+    #[serde(skip)]
+    pending_save: bool,
+}
 #[derive(Clone, Deserialize, Serialize)] struct Account { email: String, balance: f64 }
 #[derive(Clone, Deserialize, Serialize)] struct SavedCredentials { email: String, password: String }
-#[derive(Deserialize)] struct LoginResponse { access_token: String }
 #[derive(Deserialize)] struct ApiKey {
     id: i64,
     key: String,
@@ -61,34 +68,91 @@ impl ApiKey {
     }
 }
 
-async fn request_json<T: DeserializeOwned>(request: reqwest::RequestBuilder) -> Result<T, String> {
+enum RequestError {
+    Unauthorized(String),
+    Other(String),
+}
+
+impl From<String> for RequestError {
+    fn from(message: String) -> Self { Self::Other(message) }
+}
+
+impl From<RequestError> for String {
+    fn from(error: RequestError) -> Self {
+        match error {
+            RequestError::Unauthorized(message) | RequestError::Other(message) => message,
+        }
+    }
+}
+
+async fn request_json<T: DeserializeOwned>(request: RequestBuilder) -> Result<T, RequestError> {
     let response = request.send().await.map_err(|_| err("无法连接到中转站，请检查网络后重试。"))?;
     let status = response.status();
     let body = response.text().await.map_err(|_| err("无法读取中转站响应。"))?;
     let value: Value = serde_json::from_str(&body).map_err(|_| err("中转站返回了无法识别的数据。"))?;
 
     let message = || value.get("message").and_then(Value::as_str).filter(|text| !text.trim().is_empty()).map(str::to_owned).unwrap_or_else(|| err("中转站请求失败。"));
-    if !status.is_success() { return Err(message()); }
+    if status == StatusCode::UNAUTHORIZED { return Err(RequestError::Unauthorized(message())); }
+    if !status.is_success() { return Err(message().into()); }
 
     // The relay's current API returns successful objects directly. Older deployments
     // wrap them as { code, message, data }, so accept both response shapes.
     if let Some(code) = value.get("code").and_then(Value::as_i64) {
-        if code != 0 { return Err(message()); }
+        if code != 0 { return Err(message().into()); }
         if let Some(data) = value.get("data") {
-            return serde_json::from_value(data.clone()).map_err(|_| err("中转站返回了无法识别的数据。"));
+            return serde_json::from_value(data.clone()).map_err(|_| err("中转站返回了无法识别的数据。").into());
         }
     }
-    serde_json::from_value(value).map_err(|_| err("中转站返回了无法识别的数据。"))
+    serde_json::from_value(value).map_err(|_| err("中转站返回了无法识别的数据。").into())
 }
 
-async fn get_account(client: &Client, token: &str) -> Result<Account, String> { request_json(client.get(format!("{API_BASE}/auth/me")).bearer_auth(token)).await }
+async fn request_with_session<T: DeserializeOwned>(
+    client: &Client,
+    session: &mut Session,
+    request: impl Fn() -> RequestBuilder,
+) -> Result<T, RequestError> {
+    // Callers hold the session lock so concurrent requests cannot reuse a rotated token.
+    if session.pending_save {
+        save_session(session)?;
+        session.pending_save = false;
+    }
 
-async fn get_group_keys(client: &Client, token: &str, group_id: i64) -> Result<Vec<ApiKey>, String> {
+    match request_json(request().bearer_auth(&session.access_token)).await {
+        Err(RequestError::Unauthorized(_)) => {}
+        result => return result,
+    }
+
+    let expired = || RequestError::Unauthorized(err("登录会话已失效，请退出后重新登录。"));
+    let refresh_token = session.refresh_token.as_deref()
+        .filter(|token| !token.is_empty())
+        .ok_or_else(expired)?;
+    let renewed: Session = request_json(client.post(format!("{API_BASE}/auth/refresh"))
+        .json(&serde_json::json!({ "refresh_token": refresh_token }))).await
+        .map_err(|error| match error {
+            RequestError::Unauthorized(_) => expired(),
+            other => other,
+        })?;
+    if renewed.access_token.is_empty() || renewed.refresh_token.as_deref().unwrap_or_default().is_empty() {
+        return Err(err("中转站未返回完整的续期令牌，请重新登录。").into());
+    }
+
+    // Keep the new pair in memory even if saving fails, so the next request can retry the save.
+    *session = renewed;
+    session.pending_save = true;
+    save_session(session)?;
+    session.pending_save = false;
+    request_json(request().bearer_auth(&session.access_token)).await
+}
+
+async fn get_account(client: &Client, session: &mut Session) -> Result<Account, RequestError> {
+    request_with_session(client, session, || client.get(format!("{API_BASE}/auth/me"))).await
+}
+
+async fn get_group_keys(client: &Client, session: &mut Session, group_id: i64) -> Result<Vec<ApiKey>, String> {
     let mut keys = Vec::new();
     let mut page = 1_u64;
     loop {
-        let result: KeyPage = request_json(client.get(format!("{API_BASE}/keys"))
-            .bearer_auth(token)
+        let result: KeyPage = request_with_session(client, session, || client.get(format!("{API_BASE}/keys"))
             .query(&[("page", page.to_string()), ("page_size", "100".to_owned()), ("group_id", group_id.to_string())])).await?;
         keys.extend(result.items.into_iter().filter(|key| key.usable_for_group(group_id)));
         if page >= result.pages { break; }
@@ -166,12 +230,13 @@ fn write_codex_files(auth_path: &Path, config_path: &Path, key: &str, config: &s
 async fn login(state: State<'_, AppState>, email: String, password: String, remember_credentials: bool) -> Result<Account, String> {
     let credentials = SavedCredentials { email, password };
     let client = Client::new();
-    let login: LoginResponse = request_json(client.post(format!("{API_BASE}/auth/login")).json(&serde_json::json!({ "email": &credentials.email, "password": &credentials.password }))).await?;
-    let account = get_account(&client, &login.access_token).await?;
-    let session = Session { access_token: login.access_token };
-    save_session(&session)?;
+    let mut current = state.session.lock().await;
+    let session: Session = request_json(client.post(format!("{API_BASE}/auth/login"))
+        .json(&serde_json::json!({ "email": &credentials.email, "password": &credentials.password }))).await?;
+    let account = request_json(client.get(format!("{API_BASE}/auth/me")).bearer_auth(&session.access_token)).await?;
     if remember_credentials { save_credentials(&credentials)?; } else { clear_saved_credentials()?; }
-    *state.session.lock().map_err(|_| err("应用会话不可用。"))? = Some(session);
+    save_session(&session)?;
+    *current = Some(session);
     Ok(account)
 }
 
@@ -194,40 +259,44 @@ async fn reset_chatgpt_login() -> Result<ResetLoginResult, String> {
 
 #[tauri::command]
 async fn restore_session(state: State<'_, AppState>) -> Result<Option<Account>, String> {
-    let session = match load_session() {
-        Ok(Some(session)) => session,
-        Ok(None) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    let client = Client::new();
-    match get_account(&client, &session.access_token).await {
-        Ok(account) => {
-            *state.session.lock().map_err(|_| err("应用会话不可用。"))? = Some(session);
-            Ok(Some(account))
+    let mut current = state.session.lock().await;
+    if current.is_none() {
+        *current = load_session()?;
+    }
+    let Some(session) = current.as_mut() else { return Ok(None); };
+    match get_account(&Client::new(), session).await {
+        Ok(account) => Ok(Some(account)),
+        Err(RequestError::Unauthorized(_)) => {
+            clear_session()?;
+            *current = None;
+            Ok(None)
         }
-        Err(_) => { clear_session()?; Ok(None) }
+        Err(error) => Err(error.into()),
     }
 }
 
 #[tauri::command]
 async fn refresh_balance(state: State<'_, AppState>) -> Result<f64, String> {
-    let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
-    let account = get_account(&Client::new(), &session.access_token).await?;
+    let mut current = state.session.lock().await;
+    let session = current.as_mut().ok_or_else(|| err("请先登录。"))?;
+    let account = get_account(&Client::new(), session).await?;
     Ok(account.balance)
 }
 
 #[tauri::command]
 async fn list_available_groups(state: State<'_, AppState>) -> Result<Vec<AvailableGroup>, String> {
-    let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
+    let mut current = state.session.lock().await;
+    let session = current.as_mut().ok_or_else(|| err("请先登录。"))?;
     let client = Client::new();
-    request_json(client.get(format!("{API_BASE}/groups/available")).bearer_auth(&session.access_token)).await
+    Ok(request_with_session(&client, session, || client.get(format!("{API_BASE}/groups/available"))).await?)
 }
 
 #[tauri::command]
 async fn list_group_keys(state: State<'_, AppState>, group_id: i64) -> Result<Vec<AvailableKey>, String> {
     if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
-    let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
-    let keys = get_group_keys(&Client::new(), &session.access_token, group_id).await?;
+    let mut current = state.session.lock().await;
+    let session = current.as_mut().ok_or_else(|| err("请先登录。"))?;
+    let keys = get_group_keys(&Client::new(), session, group_id).await?;
     Ok(keys.iter().map(ApiKey::available).collect())
 }
 
@@ -236,37 +305,40 @@ async fn configure_claude(state: State<'_, AppState>, group_id: i64, key_id: Opt
     let model = model.trim().to_owned();
     claude::validate_model(&model)?;
     let settings_path = claude::settings_path()?;
-    let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
+    let mut current = state.session.lock().await;
+    let session = current.as_mut().ok_or_else(|| err("请先登录。"))?;
     let client = Client::new();
-    let account = get_account(&client, &session.access_token).await?;
-    let (api_key, key_created) = resolve_group_key(&client, &session.access_token, group_id, key_id, "anthropic").await?;
+    let account = get_account(&client, session).await?;
+    let (api_key, key_created) = resolve_group_key(&client, session, group_id, key_id, "anthropic").await?;
+    drop(current);
     let key = api_key.available();
     tauri::async_runtime::spawn_blocking(move || claude::write_settings(&settings_path, &api_key.key, &model)).await
         .map_err(|_| err("Claude Code 配置保存任务异常。"))??;
     Ok(ConfigureClaudeResult { balance: account.balance, key_created, key })
 }
 
-async fn resolve_group_key(client: &Client, token: &str, group_id: i64, key_id: Option<i64>, platform: &str) -> Result<(ApiKey, bool), String> {
+async fn resolve_group_key(client: &Client, session: &mut Session, group_id: i64, key_id: Option<i64>, platform: &str) -> Result<(ApiKey, bool), String> {
     if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
-    let groups: Vec<AvailableGroup> = request_json(client.get(format!("{API_BASE}/groups/available")).bearer_auth(token)).await?;
+    let groups: Vec<AvailableGroup> = request_with_session(client, session, || client.get(format!("{API_BASE}/groups/available"))).await?;
     if !groups.iter().any(|group| group.id == group_id && group.platform.trim().eq_ignore_ascii_case(platform)) {
         return Err(err("所选分组不可用或不支持当前客户端，请重新加载分组。"));
     }
     if let Some(key_id) = key_id {
         if key_id <= 0 { return Err(err("请选择有效的 API 密钥。")); }
-        let key: ApiKey = request_json(client.get(format!("{API_BASE}/keys/{key_id}")).bearer_auth(token)).await?;
+        let key: ApiKey = request_with_session(client, session, || client.get(format!("{API_BASE}/keys/{key_id}"))).await?;
         if key.id != key_id || !key.usable_for_group(group_id) {
             return Err(err("所选密钥不属于当前分组或已不可用，请重新加载密钥。"));
         }
         Ok((key, false))
     } else {
         // Recheck the group to avoid creating another dedicated key after a failed local write.
-        let existing = get_group_keys(client, token, group_id).await?
+        let existing = get_group_keys(client, session, group_id).await?
             .into_iter().find(|key| key.name == KEY_NAME);
         match existing {
             Some(key) => Ok((key, false)),
             None => {
-                let key: ApiKey = request_json(client.post(format!("{API_BASE}/keys")).bearer_auth(token).json(&CreateKeyRequest { name: KEY_NAME, group_id })).await?;
+                let key: ApiKey = request_with_session(client, session, || client.post(format!("{API_BASE}/keys"))
+                    .json(&CreateKeyRequest { name: KEY_NAME, group_id })).await?;
                 if !key.usable_for_group(group_id) { return Err(err("新建密钥不可用，请重新加载密钥后重试。")); }
                 Ok((key, true))
             }
@@ -278,12 +350,14 @@ async fn resolve_group_key(client: &Client, token: &str, group_id: i64, key_id: 
 async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<i64>, model: String) -> Result<EnableResult, String> {
     let config = codex_config(&model)?;
     if group_id <= 0 { return Err(err("请选择有效的密钥分组。")); }
-    let session = state.session.lock().map_err(|_| err("应用会话不可用。"))?.clone().ok_or_else(|| err("请先登录。"))?;
+    let mut current = state.session.lock().await;
+    let session = current.as_mut().ok_or_else(|| err("请先登录。"))?;
     let app_id = tauri::async_runtime::spawn_blocking(client::find_client).await
         .map_err(|_| err("ChatGPT 客户端检测任务异常。"))??;
     let client = Client::new();
-    let account = get_account(&client, &session.access_token).await?;
-    let (api_key, key_created) = resolve_group_key(&client, &session.access_token, group_id, key_id, "openai").await?;
+    let account = get_account(&client, session).await?;
+    let (api_key, key_created) = resolve_group_key(&client, session, group_id, key_id, "openai").await?;
+    drop(current);
     let key = api_key.available();
     let record = ProvisionedKey { id: api_key.id, secret: api_key.key, group_id: Some(group_id) };
     write_codex(&record.secret, &config)?;
@@ -299,7 +373,12 @@ async fn enable_codex(state: State<'_, AppState>, group_id: i64, key_id: Option<
 }
 
 #[tauri::command]
-fn logout(state: State<'_, AppState>) -> Result<(), String> { clear_session()?; clear_saved_credentials()?; *state.session.lock().map_err(|_| err("应用会话不可用。"))? = None; Ok(()) }
+async fn logout(state: State<'_, AppState>) -> Result<(), String> {
+    let mut current = state.session.lock().await;
+    clear_session()?;
+    *current = None;
+    clear_saved_credentials()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() { tauri::Builder::default().plugin(tauri_plugin_opener::init()).manage(AppState::default()).invoke_handler(tauri::generate_handler![login, get_saved_credentials, forget_saved_credentials, reset_chatgpt_login, restore_session, refresh_balance, list_available_groups, list_group_keys, enable_codex, configure_claude, logout]).run(tauri::generate_context!()).expect("Tauri application failed"); }
@@ -435,11 +514,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "Requires a saved login and CODEX_QUICK_CONNECT_TEST_GROUP; performs read-only API requests"]
+    #[ignore = "Requires a saved login and CODEX_QUICK_CONNECT_TEST_GROUP; may renew the saved session"]
     fn live_group_keys_contract() {
         let group_id: i64 = std::env::var("CODEX_QUICK_CONNECT_TEST_GROUP").expect("Set a group containing an existing key").parse().unwrap();
-        let session = load_session().unwrap().expect("Sign in to the desktop app first");
-        let keys = tauri::async_runtime::block_on(get_group_keys(&Client::new(), &session.access_token, group_id)).unwrap();
+        let mut session = load_session().unwrap().expect("Sign in to the desktop app first");
+        let keys = tauri::async_runtime::block_on(get_group_keys(&Client::new(), &mut session, group_id)).unwrap();
         assert!(!keys.is_empty(), "Expected an existing usable key in the test group");
         assert!(keys.iter().all(|key| key.usable_for_group(group_id)));
         println!("Read-only group lookup returned {} usable key(s)", keys.len());
