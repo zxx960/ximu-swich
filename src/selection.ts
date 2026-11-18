@@ -1,5 +1,13 @@
 export const DEFAULT_MODEL = "gpt-6.1-sol";
-export const MODELS = [DEFAULT_MODEL, "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"];
+export const MODELS = [
+  DEFAULT_MODEL,
+  "gpt-6.2-sol",
+  "gpt-6.2-astra",
+  "gpt-6-sol",
+  "gpt-6-astra",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+];
 export const CLAUDE_DEFAULT_MODEL = "claude-sonnet-5";
 export const CLAUDE_MODELS = [CLAUDE_DEFAULT_MODEL, "claude-opus-5-5", "claude-fable-5-1"];
 export type ConnectionTarget = "chatgpt" | "claude";

@@ -12,7 +12,15 @@ mod files;
 
 const API_BASE: &str = "https://codex.ximuai.com/api/v1";
 const CODEX_BASE_URL: &str = "https://codex.ximuai.com";
-const CODEX_MODELS: &[&str] = &["gpt-6.1-sol", "gpt-6-sol", "gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-terra"];
+const CODEX_MODELS: &[&str] = &[
+    "gpt-6.1-sol",
+    "gpt-6.2-sol",
+    "gpt-6.2-astra",
+    "gpt-6-sol",
+    "gpt-6-astra",
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+];
 const KEY_NAME: &str = "西牧ai";
 
 #[derive(Default)] struct AppState { session: Mutex<Option<Session>> }
